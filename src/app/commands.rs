@@ -218,6 +218,18 @@ pub fn redo(app: &mut App) {
     }
 }
 
+fn copy_path(app: &mut App) {
+    let Some(path) = app
+        .explorer_entries
+        .get(app.explorer_selected)
+        .map(|entry| entry.path.display().to_string())
+    else {
+        return;
+    };
+    app.clipboard.copy(&path);
+    app.message = Some("path copied".into());
+}
+
 pub fn copy(app: &mut App) {
     let Some(id) = app.active else { return };
     if let (Some(doc), Some(view)) = (app.documents.get(&id), app.views.get(&id)) {
@@ -1091,6 +1103,11 @@ pub fn show_explorer_menu(app: &mut App, x: u16, y: u16) {
                 enabled: true,
             },
             MenuItem {
+                label: "Copy Path".into(),
+                action: MenuAction::CopyPath,
+                enabled: app.explorer_entries.get(app.explorer_selected).is_some(),
+            },
+            MenuItem {
                 label: "Delete".into(),
                 action: MenuAction::DeletePath,
                 enabled: true,
@@ -1134,6 +1151,7 @@ pub fn run_menu(app: &mut App, action: MenuAction) {
                 kind: PromptKind::RenameFile,
             };
         }
+        MenuAction::CopyPath => copy_path(app),
         MenuAction::DeletePath => {
             if let Some(entry) = app.explorer_entries.get(app.explorer_selected) {
                 app.overlay = Overlay::Confirm {

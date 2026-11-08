@@ -196,7 +196,7 @@ fn paint_hscroll(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme, inn
     for i in 0..bar.track_w {
         let on_thumb = i >= thumb_start && i < thumb_end;
         let (glyph, style) = if on_thumb {
-            ("━", Style::default().fg(theme.accent).bg(theme.bg))
+            ("─", Style::default().fg(theme.accent).bg(theme.bg))
         } else {
             ("─", Style::default().fg(theme.border).bg(theme.bg))
         };

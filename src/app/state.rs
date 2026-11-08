@@ -59,6 +59,7 @@ pub enum MenuAction {
     NewFile,
     NewFolder,
     RenameFile,
+    CopyPath,
     DeletePath,
 }
 
