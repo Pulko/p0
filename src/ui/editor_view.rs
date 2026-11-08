@@ -42,19 +42,23 @@ pub fn render(frame: &mut Frame, tabs: Rect, area: Rect, app: &mut App) {
     }
     let tab_width = app.config.tab_width;
     let number_width = ((doc.rope.len_lines().max(1).ilog10() as u16) + 2).max(4);
+    let rows = app.visual_rows(id);
+    let changes = app.inline_changes.get(&id).cloned();
+    let hunks = changes
+        .as_ref()
+        .map(crate::workspace::change_hunks)
+        .unwrap_or_default();
     let gutter = number_width + 1;
     app.gutter_width = gutter;
     let inner_h = area.height.saturating_sub(2) as usize;
     let inner_w = area.width.saturating_sub(2 + gutter) as usize;
-    let rows = app.visual_rows(id);
-    let changes = app.inline_changes.get(&id).cloned();
     let visible_lines: Vec<usize> = rows
         .iter()
         .skip(view.viewport.top)
         .take(inner_h)
         .filter_map(|row| match row {
             VisualRow::Line(line) => Some(*line),
-            VisualRow::Removed { .. } => None,
+            VisualRow::Removed { .. } | VisualRow::Eof { .. } => None,
         })
         .collect();
     let highlight_start = visible_lines.first().copied().unwrap_or(0);
@@ -95,6 +99,10 @@ pub fn render(frame: &mut Frame, tabs: Rect, area: Rect, app: &mut App) {
             ));
             continue;
         }
+        if matches!(visual, VisualRow::Eof { .. }) {
+            lines.push(eof_line(number_width, theme));
+            continue;
+        }
         let VisualRow::Line(line_idx) = visual else {
             continue;
         };
@@ -103,8 +111,14 @@ pub fn render(frame: &mut Frame, tabs: Rect, area: Rect, app: &mut App) {
             continue;
         }
         let text = line_text(&doc.rope, line_idx);
-        let ln = format!("{:>width$}", line_idx + 1, width = number_width as usize);
-        let mut spans = vec![Span::styled(ln, Style::default().fg(theme.fg_dim))];
+        let button = changes.as_ref().and_then(|changes| {
+            hunks
+                .iter()
+                .any(|hunk| hunk.start == line_idx)
+                .then(|| change_style(changes, line_idx, theme))
+                .flatten()
+        });
+        let mut spans = line_number(line_idx, number_width, button, theme);
         spans.push(match changes.as_ref() {
             Some(changes) => gutter_span(changes, line_idx, theme),
             None => Span::raw(" "),
@@ -213,6 +227,26 @@ fn paint_hscroll(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme, inn
     );
 }
 
+fn line_number(
+    line_idx: usize,
+    number_width: u16,
+    revert: Option<Style>,
+    theme: Theme,
+) -> Vec<Span<'static>> {
+    let ln = format!("{:>width$}", line_idx + 1, width = number_width as usize);
+    let Some(revert) = revert else {
+        return vec![Span::styled(ln, Style::default().fg(theme.fg_dim))];
+    };
+    let mut spans = vec![Span::styled("↩", revert)];
+    if number_width > 1 {
+        spans.push(Span::styled(
+            ln[1..].to_string(),
+            Style::default().fg(theme.fg_dim),
+        ));
+    }
+    spans
+}
+
 fn removed_line(
     text: &str,
     left: usize,
@@ -229,6 +263,16 @@ fn removed_line(
             Style::default().fg(theme.deleted),
         ),
     ])
+}
+
+fn eof_line(number_width: u16, theme: Theme) -> Line<'static> {
+    let deleted = Style::default().fg(theme.on_accent).bg(theme.deleted);
+    let mut spans = vec![Span::styled("↩", deleted)];
+    if number_width > 1 {
+        spans.push(Span::raw(" ".repeat(number_width as usize - 1)));
+    }
+    spans.push(Span::styled("▾", deleted));
+    Line::from(spans)
 }
 
 fn scrolled_plain(text: &str, left: usize, width: usize, tab_width: usize) -> String {
@@ -266,21 +310,39 @@ fn scrolled_plain(text: &str, left: usize, width: usize, tab_width: usize) -> St
 }
 
 fn gutter_span(changes: &LineChanges, line_idx: usize, theme: Theme) -> Span<'static> {
+    let Some(style) = change_style(changes, line_idx, theme) else {
+        return Span::raw(" ");
+    };
+    let deleted = changes.deleted_before.get(line_idx).copied().unwrap_or(0) > 0;
+    let mark = changes
+        .marks
+        .get(line_idx)
+        .copied()
+        .unwrap_or(LineMark::Unchanged);
+    if deleted && mark == LineMark::Unchanged {
+        Span::styled("▾", style)
+    } else {
+        Span::styled(" ", style)
+    }
+}
+
+fn change_style(changes: &LineChanges, line_idx: usize, theme: Theme) -> Option<Style> {
     let mark = changes
         .marks
         .get(line_idx)
         .copied()
         .unwrap_or(LineMark::Unchanged);
     let deleted = changes.deleted_before.get(line_idx).copied().unwrap_or(0) > 0;
-    if deleted && mark == LineMark::Unchanged {
-        Span::styled("▾", Style::default().fg(theme.on_accent).bg(theme.deleted))
+    let color = if deleted && mark == LineMark::Unchanged {
+        theme.deleted
     } else {
         match mark {
-            LineMark::Added => Span::styled(" ", Style::default().bg(theme.added)),
-            LineMark::Modified => Span::styled(" ", Style::default().bg(theme.modified)),
-            LineMark::Unchanged => Span::raw(" "),
+            LineMark::Added => theme.added,
+            LineMark::Modified => theme.modified,
+            LineMark::Unchanged => return None,
         }
-    }
+    };
+    Some(Style::default().fg(theme.on_accent).bg(color))
 }
 
 fn render_diff(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {

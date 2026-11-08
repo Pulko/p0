@@ -1261,6 +1261,19 @@ pub fn handle_watch(app: &mut App, event: WatchEvent) {
 
 pub fn click_editor(app: &mut App, x: u16, y: u16, selecting: bool) {
     let Some(id) = app.active else { return };
+    if !selecting && in_revert_column(app, x, y) && shows_revert(app, x, y) {
+        if let Some(line) = visual_target_line(app, x, y) {
+            app.revert_hunk_at_line(id, line);
+            let height = app.editor_area.3.saturating_sub(2).max(1) as usize;
+            let width = app.editor_area.2.saturating_sub(app.gutter_width) as usize;
+            let tab_width = app.config.tab_width;
+            if let (Some(doc), Some(view)) = (app.documents.get(&id), app.views.get_mut(&id)) {
+                view.ensure_visible(&doc.rope, height, width, tab_width);
+            }
+            reveal_cursor(app, id);
+        }
+        return;
+    }
     let removed = removed_row_click(app, x, y);
     if removed {
         if !selecting {
@@ -1299,17 +1312,46 @@ fn removed_row_click(app: &App, x: u16, y: u16) -> bool {
     matches!(row, crate::workspace::VisualRow::Removed { .. })
 }
 
+fn in_revert_column(app: &App, x: u16, y: u16) -> bool {
+    editor_rel_x(app, x, y) == Some(0)
+}
+
+fn shows_revert(app: &App, x: u16, y: u16) -> bool {
+    let Some(id) = app.active else {
+        return false;
+    };
+    let Some(row) = visual_row_at(app, x, y) else {
+        return false;
+    };
+    let hunks = app
+        .inline_changes
+        .get(&id)
+        .map(crate::workspace::change_hunks)
+        .unwrap_or_default();
+    match row {
+        crate::workspace::VisualRow::Line(line) => hunks.iter().any(|hunk| hunk.start == line),
+        crate::workspace::VisualRow::Eof { .. } => true,
+        crate::workspace::VisualRow::Removed { .. } => false,
+    }
+}
+
 fn gutter_click(app: &App, x: u16, y: u16) -> bool {
+    let Some(rel_x) = editor_rel_x(app, x, y) else {
+        return false;
+    };
+    rel_x + 1 == app.gutter_width
+}
+
+fn editor_rel_x(app: &App, x: u16, y: u16) -> Option<u16> {
     let (ex, ey, _ew, eh) = app.editor_area;
     if y <= ey || x <= ex {
-        return false;
+        return None;
     }
-    let rel_x = x.saturating_sub(ex).saturating_sub(1);
     let rel_y = y.saturating_sub(ey).saturating_sub(1);
     if rel_y >= eh.saturating_sub(2) {
-        return false;
+        return None;
     }
-    rel_x + 1 == app.gutter_width
+    Some(x.saturating_sub(ex).saturating_sub(1))
 }
 
 fn visual_row_at(app: &App, x: u16, y: u16) -> Option<crate::workspace::VisualRow> {

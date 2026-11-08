@@ -11,7 +11,9 @@ use nucleo::{Config, Nucleo};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use crate::editor::Position;
+use ropey::Rope;
+
+use crate::editor::{Position, Range, line_visible_chars};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GitFileStatus {
@@ -81,6 +83,33 @@ pub struct Hunk {
 pub enum VisualRow {
     Line(usize),
     Removed { text: String, anchor: usize },
+    Eof { anchor: usize },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HunkReplacement {
+    Lines {
+        start: usize,
+        end: usize,
+        text: String,
+    },
+    ThroughEnd {
+        start: usize,
+        text: String,
+    },
+    AtEnd {
+        text: String,
+    },
+}
+
+impl HunkReplacement {
+    pub fn text(&self) -> &str {
+        match self {
+            HunkReplacement::Lines { text, .. }
+            | HunkReplacement::ThroughEnd { text, .. }
+            | HunkReplacement::AtEnd { text } => text,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -598,6 +627,62 @@ fn removed_at(changes: &LineChanges, index: usize) -> Vec<String> {
         .unwrap_or_default()
 }
 
+pub fn hunk_replacement(
+    hunk: &Hunk,
+    line_count: usize,
+    ends_with_newline: bool,
+) -> HunkReplacement {
+    if hunk.start >= line_count {
+        let mut text = String::new();
+        if line_count > 0 && !ends_with_newline && !hunk.removed.is_empty() {
+            text.push('\n');
+        }
+        if !hunk.removed.is_empty() {
+            text.push_str(&hunk.removed.join("\n"));
+        }
+        return HunkReplacement::AtEnd { text };
+    }
+    if hunk.end >= line_count {
+        return HunkReplacement::ThroughEnd {
+            start: hunk.start,
+            text: hunk.removed.join("\n"),
+        };
+    }
+    let mut text = String::new();
+    for line in &hunk.removed {
+        text.push_str(line);
+        text.push('\n');
+    }
+    HunkReplacement::Lines {
+        start: hunk.start,
+        end: hunk.end,
+        text,
+    }
+}
+
+pub fn hunk_edit_range(rope: &Rope, replacement: &HunkReplacement) -> Range {
+    match replacement {
+        HunkReplacement::Lines { start, end, .. } => {
+            Range::new(Position::new(*start, 0), Position::new(*end, 0))
+        }
+        HunkReplacement::ThroughEnd { start, .. } => {
+            Range::new(Position::new(*start, 0), rope_end(rope))
+        }
+        HunkReplacement::AtEnd { .. } => {
+            let end = rope_end(rope);
+            Range::new(end, end)
+        }
+    }
+}
+
+fn rope_end(rope: &Rope) -> Position {
+    if rope.len_chars() == 0 {
+        return Position::default();
+    }
+    let line = rope.len_lines() - 1;
+    Position::new(line, line_visible_chars(rope, line))
+}
+
 pub fn visual_rows(line_count: usize, hunks: &[Hunk], open: &[usize]) -> Vec<VisualRow> {
     let mut rows = Vec::new();
     let mut index = 0;
@@ -611,10 +696,14 @@ pub fn visual_rows(line_count: usize, hunks: &[Hunk], open: &[usize]) -> Vec<Vis
         rows.push(VisualRow::Line(index));
         index += 1;
     }
-    if let Some(hunk) = hunks.iter().find(|hunk| {
-        hunk.start == line_count && hunk.end == line_count && open.contains(&hunk.start)
-    }) {
-        push_removed(&mut rows, hunk);
+    if let Some(hunk) = hunks
+        .iter()
+        .find(|hunk| hunk.start == line_count && hunk.end == line_count)
+    {
+        if open.contains(&hunk.start) {
+            push_removed(&mut rows, hunk);
+        }
+        rows.push(VisualRow::Eof { anchor: line_count });
     }
     rows
 }
@@ -636,7 +725,7 @@ pub fn visual_index_for_line(rows: &[VisualRow], line: usize) -> Option<usize> {
 pub fn buffer_line_at(rows: &[VisualRow], visual_index: usize) -> Option<usize> {
     match rows.get(visual_index)? {
         VisualRow::Line(line) => Some(*line),
-        VisualRow::Removed { anchor, .. } => Some(*anchor),
+        VisualRow::Removed { anchor, .. } | VisualRow::Eof { anchor } => Some(*anchor),
     }
 }
 
@@ -871,6 +960,75 @@ mod tests {
         assert_eq!(buffer_line_at(&open, 1), Some(1));
         assert_eq!(buffer_line_at(&open, 4), Some(3));
         assert_eq!(visual_index_for_line(&open, 3), Some(4));
+    }
+
+    #[test]
+    fn shows_a_row_for_a_deletion_at_the_end() {
+        let changes = classify_lines("keep\ngone", "keep");
+        let hunks = change_hunks(&changes);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].start, 1);
+        let closed = visual_rows(1, &hunks, &[]);
+        assert_eq!(closed[0], VisualRow::Line(0));
+        assert_eq!(closed[1], VisualRow::Eof { anchor: 1 });
+        let open = visual_rows(1, &hunks, &[1]);
+        assert_eq!(
+            open[1],
+            VisualRow::Removed {
+                text: "gone".into(),
+                anchor: 1,
+            }
+        );
+        assert_eq!(open[2], VisualRow::Eof { anchor: 1 });
+        assert_eq!(buffer_line_at(&open, 1), Some(1));
+        assert_eq!(buffer_line_at(&open, 2), Some(1));
+    }
+
+    #[test]
+    fn revert_restores_one_hunk() {
+        assert_eq!(
+            restored("alpha\nbeta\ngamma\n", "alpha\nBETA\ngamma\n"),
+            "alpha\nbeta\ngamma\n"
+        );
+        assert_eq!(restored("alpha\nbeta", "alpha\nBETA"), "alpha\nbeta");
+        assert_eq!(
+            restored("alpha\ngamma\n", "alpha\nextra\ngamma\n"),
+            "alpha\ngamma\n"
+        );
+        assert_eq!(
+            restored("keep\ngone\nstay\n", "keep\nstay\n"),
+            "keep\ngone\nstay\n"
+        );
+        assert_eq!(restored("a\n\nb\n", "a\nb\n"), "a\n\nb\n");
+        assert_eq!(restored("keep\ngone", "keep"), "keep\ngone");
+    }
+
+    #[test]
+    fn revert_edit_undoes_in_one_step() {
+        let original = "alpha\nbeta\n";
+        let current = "alpha\nBETA\n";
+        let mut doc =
+            crate::editor::Document::new(crate::editor::DocumentId(1), None, current.into());
+        let changes = classify_lines(original, current);
+        let hunks = change_hunks(&changes);
+        let replacement = hunk_replacement(&hunks[0], changes.marks.len(), true);
+        let range = hunk_edit_range(&doc.rope, &replacement);
+        doc.apply_replace(range, replacement.text(), false);
+        assert_eq!(doc.text(), original);
+        doc.undo().unwrap();
+        assert_eq!(doc.text(), current);
+    }
+
+    fn restored(original: &str, current: &str) -> String {
+        let changes = classify_lines(original, current);
+        let hunks = change_hunks(&changes);
+        assert_eq!(hunks.len(), 1);
+        let replacement = hunk_replacement(&hunks[0], changes.marks.len(), current.ends_with('\n'));
+        let mut doc =
+            crate::editor::Document::new(crate::editor::DocumentId(1), None, current.to_string());
+        let range = hunk_edit_range(&doc.rope, &replacement);
+        doc.apply_replace(range, replacement.text(), false);
+        doc.text()
     }
 
     #[test]

@@ -300,6 +300,7 @@ pub(crate) fn shortcut_rows() -> Vec<(&'static str, &'static str)> {
         ("Ctrl+Z / Y", "Undo / redo"),
         ("Ctrl+Tab", "Next / previous tab"),
         ("Ctrl+Shift+D", "Git diff"),
+        ("Click ↩", "Revert this change"),
         ("Ctrl+B", "Toggle explorer"),
         ("Ctrl+W", "Close file"),
         ("Ctrl+N", "New file"),

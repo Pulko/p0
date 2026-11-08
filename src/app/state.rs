@@ -730,6 +730,34 @@ impl App {
         }
     }
 
+    pub fn revert_hunk_at_line(&mut self, document_id: DocumentId, line: usize) {
+        let prepared = self.inline_changes.get(&document_id).and_then(|changes| {
+            let line_count = changes.marks.len();
+            crate::workspace::change_hunks(changes)
+                .into_iter()
+                .find(|hunk| line >= hunk.start && line < hunk.end.max(hunk.start + 1))
+                .map(|hunk| (hunk, line_count))
+        });
+        let Some((hunk, line_count)) = prepared else {
+            return;
+        };
+        let Some(doc) = self.documents.get_mut(&document_id) else {
+            return;
+        };
+        let ends_with_newline =
+            doc.rope.len_chars() > 0 && doc.rope.char(doc.rope.len_chars() - 1) == '\n';
+        let replacement = crate::workspace::hunk_replacement(&hunk, line_count, ends_with_newline);
+        let range = crate::workspace::hunk_edit_range(&doc.rope, &replacement);
+        let change = doc.apply_replace(range, replacement.text(), false);
+        let caret = change.start_position;
+        if let Some(view) = self.views.get_mut(&document_id) {
+            view.cursor = caret;
+            view.selection = None;
+            view.preferred_column = None;
+        }
+        self.apply_changes(vec![change]);
+    }
+
     pub fn theme(&self) -> crate::ui::theme::Theme {
         crate::ui::theme::by_name(&self.config.theme)
     }
