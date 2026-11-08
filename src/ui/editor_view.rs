@@ -7,13 +7,14 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
-use crate::app::state::TabHitBox;
-use crate::editor::{Range, display_col, line_text};
+use crate::app::state::{HScrollHit, TabHitBox};
+use crate::editor::{Range, display_col, hscroll_bar, line_text, max_line_display_width};
 use crate::syntax::HighlightKind;
 use crate::ui::theme::Theme;
 use crate::workspace::{DiffKind, LineChanges, LineMark, VisualRow};
 
 pub fn render(frame: &mut Frame, tabs: Rect, area: Rect, app: &mut App) {
+    app.hscroll_hit = None;
     let theme = app.theme();
     render_tabs(frame, tabs, app, theme);
     let Some(id) = app.active else {
@@ -159,6 +160,62 @@ pub fn render(frame: &mut Frame, tabs: Rect, area: Rect, app: &mut App) {
             }
         }
     }
+    paint_hscroll(frame, area, app, theme, inner_w);
+}
+
+fn paint_hscroll(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme, inner_w: usize) {
+    if area.height < 3 || inner_w == 0 {
+        return;
+    }
+    let Some(id) = app.active else { return };
+    let tab_width = app.config.tab_width;
+    let gutter = app.gutter_width;
+    let (content, left) = {
+        let Some(doc) = app.documents.get(&id) else {
+            return;
+        };
+        let Some(view) = app.views.get(&id) else {
+            return;
+        };
+        (
+            max_line_display_width(&doc.rope, tab_width),
+            view.viewport.left,
+        )
+    };
+    let track_x = area.x.saturating_add(1).saturating_add(gutter);
+    let Some(bar) = hscroll_bar(track_x, inner_w as u16, inner_w, content, left) else {
+        return;
+    };
+    let y = area.y + area.height - 1;
+    app.hscroll_hit = Some(HScrollHit {
+        x: bar.track_x,
+        y,
+        width: bar.track_w,
+        thumb_x: bar.thumb_x,
+        thumb_w: bar.thumb_w,
+        max_left: bar.max_left,
+    });
+    let thumb_start = bar.thumb_x.saturating_sub(bar.track_x);
+    let thumb_end = thumb_start.saturating_add(bar.thumb_w);
+    let mut spans = Vec::with_capacity(bar.track_w as usize);
+    for i in 0..bar.track_w {
+        let on_thumb = i >= thumb_start && i < thumb_end;
+        let (glyph, style) = if on_thumb {
+            ("━", Style::default().fg(theme.accent).bg(theme.bg))
+        } else {
+            ("─", Style::default().fg(theme.border).bg(theme.bg))
+        };
+        spans.push(Span::styled(glyph, style));
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)),
+        Rect {
+            x: bar.track_x,
+            y,
+            width: bar.track_w,
+            height: 1,
+        },
+    );
 }
 
 fn gutter_span(changes: &LineChanges, line_idx: usize, theme: Theme) -> Span<'static> {

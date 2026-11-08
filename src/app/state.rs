@@ -141,6 +141,16 @@ pub struct StatusHit {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HScrollHit {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub thumb_x: u16,
+    pub thumb_w: u16,
+    pub max_left: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TabHitBox {
     pub document_id: DocumentId,
     pub x: u16,
@@ -179,6 +189,7 @@ pub struct App {
     pub explorer_visible: bool,
     pub explorer_entries: Vec<ExplorerEntry>,
     pub explorer_selected: usize,
+    pub explorer_scroll: usize,
     pub expanded: HashSet<PathBuf>,
     pub clipboard: Clipboard,
     pub syntax: SyntaxService,
@@ -199,6 +210,9 @@ pub struct App {
     pub tab_hit_boxes: Vec<TabHitBox>,
     pub last_click: Option<(Instant, u16, u16)>,
     pub dragging: bool,
+    pub hscroll_hit: Option<HScrollHit>,
+    pub hscroll_dragging: bool,
+    pub hscroll_grab: u16,
     pub lsp_token: u64,
     pub completion_token: u64,
     pub hover_token: u64,
@@ -232,6 +246,7 @@ impl App {
             explorer_visible: config.explorer_visible,
             explorer_entries: Vec::new(),
             explorer_selected: 0,
+            explorer_scroll: 0,
             expanded,
             clipboard: Clipboard::new(),
             syntax: SyntaxService::new(),
@@ -252,6 +267,9 @@ impl App {
             tab_hit_boxes: Vec::new(),
             last_click: None,
             dragging: false,
+            hscroll_hit: None,
+            hscroll_dragging: false,
+            hscroll_grab: 0,
             lsp_token: 0,
             completion_token: 0,
             hover_token: 0,
@@ -293,6 +311,9 @@ impl App {
         if self.explorer_selected >= self.explorer_entries.len() {
             self.explorer_selected = self.explorer_entries.len().saturating_sub(1);
         }
+        let inner = explorer_inner_rows(self.explorer_area.3);
+        self.explorer_scroll =
+            clamp_explorer_scroll(self.explorer_scroll, self.explorer_entries.len(), inner);
     }
 
     pub fn refresh_git_status(&self) {
@@ -720,4 +741,60 @@ pub fn is_ident_char(ch: char) -> bool {
 
 pub fn click_was_double(last: Option<(Instant, u16, u16)>, x: u16, y: u16) -> bool {
     last.is_some_and(|(t, lx, ly)| lx == x && ly == y && t.elapsed() < Duration::from_millis(400))
+}
+
+pub fn explorer_inner_rows(height: u16) -> usize {
+    height.saturating_sub(2) as usize
+}
+
+pub fn max_explorer_scroll(len: usize, inner: usize) -> usize {
+    if inner == 0 {
+        0
+    } else {
+        len.saturating_sub(inner)
+    }
+}
+
+pub fn clamp_explorer_scroll(scroll: usize, len: usize, inner: usize) -> usize {
+    scroll.min(max_explorer_scroll(len, inner))
+}
+
+pub fn explorer_index_at(
+    scroll: usize,
+    area_y: u16,
+    area_height: u16,
+    y: u16,
+    len: usize,
+) -> Option<usize> {
+    let inner = explorer_inner_rows(area_height);
+    if inner == 0 || y <= area_y {
+        return None;
+    }
+    let rel = y.saturating_sub(area_y).saturating_sub(1) as usize;
+    if rel >= inner {
+        return None;
+    }
+    let idx = scroll + rel;
+    (idx < len).then_some(idx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explorer_scroll_clamps_to_the_last_page() {
+        assert_eq!(clamp_explorer_scroll(100, 10, 4), 6);
+        assert_eq!(clamp_explorer_scroll(5, 3, 10), 0);
+        assert_eq!(clamp_explorer_scroll(2, 8, 0), 0);
+    }
+
+    #[test]
+    fn explorer_index_includes_scroll_and_skips_the_border() {
+        assert_eq!(explorer_index_at(5, 2, 10, 3, 20), Some(5));
+        assert_eq!(explorer_index_at(5, 2, 10, 10, 20), Some(12));
+        assert_eq!(explorer_index_at(5, 2, 10, 2, 20), None);
+        assert_eq!(explorer_index_at(5, 2, 10, 11, 20), None);
+        assert_eq!(explorer_index_at(5, 2, 10, 3, 5), None);
+    }
 }

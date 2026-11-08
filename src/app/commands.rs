@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
 use crate::editor::{
-    Movement, Position, Range, Selection, delete_backward, delete_forward, indent_for_newline,
-    insert_text, move_cursor, select_word_at, selected_text, set_cursor, word_bounds,
+    HScrollBar, Movement, Position, Range, Selection, clamp_horizontal_left, delete_backward,
+    delete_forward, hscroll_left_at, indent_for_newline, insert_text, max_line_display_width,
+    move_cursor, select_word_at, selected_text, set_cursor, word_bounds,
 };
 use crate::language::{
     CompletionItem, LspCmd, LspStatus, completion_prefix, filter_completions, strip_snippets,
@@ -11,8 +12,9 @@ use crate::language::{
 use crate::workspace::{create_path, delete_path, find_in_document, rename_path};
 
 use super::state::{
-    App, ConfirmAction, Focus, MenuAction, MenuItem, Overlay, PromptKind, decode_diagnostic_pos,
-    is_ident_char,
+    App, ConfirmAction, Focus, HScrollHit, MenuAction, MenuItem, Overlay, PromptKind,
+    clamp_explorer_scroll, decode_diagnostic_pos, explorer_index_at, explorer_inner_rows,
+    is_ident_char, max_explorer_scroll,
 };
 
 pub fn save_active(app: &mut App) {
@@ -1242,28 +1244,196 @@ pub fn scroll_editor(app: &mut App, delta: i32) {
     }
 }
 
-pub fn click_explorer(app: &mut App, y: u16) {
-    let (_x, ey, _w, _h) = app.explorer_area;
-    if y < ey {
+pub fn scroll_explorer(app: &mut App, delta: i32) {
+    let inner = explorer_inner_rows(app.explorer_area.3);
+    let max = max_explorer_scroll(app.explorer_entries.len(), inner);
+    let next = app.explorer_scroll as i64 + i64::from(delta);
+    app.explorer_scroll = next.clamp(0, max as i64) as usize;
+}
+
+pub fn reveal_explorer_selection(app: &mut App) {
+    let inner = explorer_inner_rows(app.explorer_area.3);
+    if inner == 0 || app.explorer_entries.is_empty() {
         return;
     }
-    let idx = y.saturating_sub(ey).saturating_sub(1) as usize;
-    if idx < app.explorer_entries.len() {
-        app.explorer_selected = idx;
-        app.focus = Focus::Explorer;
-        explorer_activate(app);
+    let sel = app
+        .explorer_selected
+        .min(app.explorer_entries.len().saturating_sub(1));
+    if sel < app.explorer_scroll {
+        app.explorer_scroll = sel;
+    } else if sel >= app.explorer_scroll + inner {
+        app.explorer_scroll = sel + 1 - inner;
     }
+    app.explorer_scroll =
+        clamp_explorer_scroll(app.explorer_scroll, app.explorer_entries.len(), inner);
+}
+
+pub fn scroll_editor_horizontal(app: &mut App, delta: i32) {
+    let Some(id) = app.active else { return };
+    let current = app
+        .views
+        .get(&id)
+        .map(|view| view.viewport.left)
+        .unwrap_or(0);
+    assign_horizontal(app, current as i32 + delta);
+}
+
+pub fn begin_hscroll_drag(app: &mut App, x: u16, y: u16) -> bool {
+    let Some(hit) = app.hscroll_hit else {
+        return false;
+    };
+    if y != hit.y || x < hit.x || x >= hit.x.saturating_add(hit.width) {
+        return false;
+    }
+    let on_thumb = x >= hit.thumb_x && x < hit.thumb_x.saturating_add(hit.thumb_w);
+    let grab = if on_thumb {
+        x.saturating_sub(hit.thumb_x)
+    } else {
+        hit.thumb_w / 2
+    };
+    let left = hscroll_left_at(bar_from_hit(hit), x, grab);
+    app.hscroll_grab = grab;
+    app.hscroll_dragging = true;
+    assign_horizontal(app, left as i32);
+    true
+}
+
+pub fn drag_hscroll(app: &mut App, x: u16) {
+    let Some(hit) = app.hscroll_hit else {
+        return;
+    };
+    let left = hscroll_left_at(bar_from_hit(hit), x, app.hscroll_grab);
+    assign_horizontal(app, left as i32);
+}
+
+fn assign_horizontal(app: &mut App, left: i32) {
+    if app.diff_view.is_some() {
+        return;
+    }
+    let Some(id) = app.active else { return };
+    let width = app.editor_area.2.saturating_sub(2 + app.gutter_width) as usize;
+    let tab_width = app.config.tab_width;
+    let content = app
+        .documents
+        .get(&id)
+        .map(|doc| max_line_display_width(&doc.rope, tab_width))
+        .unwrap_or(0);
+    if let Some(view) = app.views.get_mut(&id) {
+        view.viewport.left = clamp_horizontal_left(left, content, width);
+    }
+}
+
+fn bar_from_hit(hit: HScrollHit) -> HScrollBar {
+    HScrollBar {
+        track_x: hit.x,
+        track_w: hit.width,
+        thumb_x: hit.thumb_x,
+        thumb_w: hit.thumb_w,
+        max_left: hit.max_left,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WheelAxis {
+    Vertical(i32),
+    Horizontal(i32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WheelAction {
+    Explorer(i32),
+    EditorVertical(i32),
+    EditorHorizontal(i32),
+    None,
+}
+
+pub fn wheel_action(
+    in_popup: bool,
+    in_explorer: bool,
+    in_editor: bool,
+    shift: bool,
+    axis: WheelAxis,
+) -> WheelAction {
+    if in_popup {
+        return WheelAction::None;
+    }
+    match axis {
+        WheelAxis::Horizontal(delta) => {
+            if in_editor {
+                WheelAction::EditorHorizontal(delta)
+            } else {
+                WheelAction::None
+            }
+        }
+        WheelAxis::Vertical(delta) if shift => {
+            if in_editor {
+                WheelAction::EditorHorizontal(if delta > 0 { 4 } else { -4 })
+            } else {
+                WheelAction::None
+            }
+        }
+        WheelAxis::Vertical(delta) if in_explorer => WheelAction::Explorer(delta),
+        WheelAxis::Vertical(delta) if in_editor => WheelAction::EditorVertical(delta),
+        WheelAxis::Vertical(_) => WheelAction::None,
+    }
+}
+
+pub fn click_explorer(app: &mut App, y: u16) {
+    let (_x, ey, _w, eh) = app.explorer_area;
+    let Some(idx) = explorer_index_at(app.explorer_scroll, ey, eh, y, app.explorer_entries.len())
+    else {
+        return;
+    };
+    app.explorer_selected = idx;
+    app.focus = Focus::Explorer;
+    explorer_activate(app);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::editor_context_labels;
+    use super::{WheelAction, WheelAxis, editor_context_labels, wheel_action};
 
     #[test]
     fn editor_menu_keeps_navigation_actions_only() {
         assert_eq!(
             editor_context_labels(),
             ["Go to Definition", "Find References"]
+        );
+    }
+
+    #[test]
+    fn wheel_follows_the_pane_under_the_pointer() {
+        assert_eq!(
+            wheel_action(false, true, false, false, WheelAxis::Vertical(3)),
+            WheelAction::Explorer(3)
+        );
+        assert_eq!(
+            wheel_action(false, false, true, false, WheelAxis::Vertical(-3)),
+            WheelAction::EditorVertical(-3)
+        );
+        assert_eq!(
+            wheel_action(false, false, false, false, WheelAxis::Vertical(3)),
+            WheelAction::None
+        );
+        assert_eq!(
+            wheel_action(true, true, true, false, WheelAxis::Vertical(3)),
+            WheelAction::None
+        );
+        assert_eq!(
+            wheel_action(false, true, false, true, WheelAxis::Vertical(3)),
+            WheelAction::None
+        );
+        assert_eq!(
+            wheel_action(false, false, true, true, WheelAxis::Vertical(3)),
+            WheelAction::EditorHorizontal(4)
+        );
+        assert_eq!(
+            wheel_action(false, false, true, false, WheelAxis::Horizontal(-4)),
+            WheelAction::EditorHorizontal(-4)
+        );
+        assert_eq!(
+            wheel_action(false, true, false, false, WheelAxis::Horizontal(4)),
+            WheelAction::None
         );
     }
 }

@@ -416,6 +416,64 @@ pub fn max_line_display_width(rope: &Rope, tab_width: usize) -> usize {
         .unwrap_or(0)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HScrollBar {
+    pub track_x: u16,
+    pub track_w: u16,
+    pub thumb_x: u16,
+    pub thumb_w: u16,
+    pub max_left: usize,
+}
+
+pub fn hscroll_bar(
+    track_x: u16,
+    track_w: u16,
+    view_width: usize,
+    content_width: usize,
+    left: usize,
+) -> Option<HScrollBar> {
+    if track_w == 0 || view_width == 0 || content_width <= view_width {
+        return None;
+    }
+    let max_left = content_width - view_width;
+    let mut thumb_w = (track_w as usize * view_width / content_width).max(1);
+    if track_w >= 2 {
+        thumb_w = thumb_w.max(2);
+    }
+    let thumb_w = thumb_w.min(track_w as usize) as u16;
+    let left = left.min(max_left);
+    let span = track_w.saturating_sub(thumb_w);
+    let thumb_x = track_x.saturating_add(if span == 0 {
+        0
+    } else {
+        ((left * span as usize) / max_left) as u16
+    });
+    Some(HScrollBar {
+        track_x,
+        track_w,
+        thumb_x,
+        thumb_w,
+        max_left,
+    })
+}
+
+pub fn hscroll_left_at(bar: HScrollBar, pointer_x: u16, grab: u16) -> usize {
+    let span = bar.track_w.saturating_sub(bar.thumb_w);
+    if span == 0 {
+        return 0;
+    }
+    let thumb_left = pointer_x
+        .saturating_sub(grab)
+        .saturating_sub(bar.track_x)
+        .min(span);
+    (thumb_left as usize * bar.max_left) / span as usize
+}
+
+pub fn clamp_horizontal_left(left: i32, content_width: usize, view_width: usize) -> usize {
+    let max_left = content_width.saturating_sub(view_width);
+    left.clamp(0, max_left as i32) as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,5 +505,25 @@ mod tests {
         let range = word_bounds(&doc.rope, Position::new(0, 2));
         assert_eq!(range.start.column, 0);
         assert_eq!(range.end.column, 5);
+    }
+
+    #[test]
+    fn horizontal_thumb_tracks_the_viewport() {
+        let start = hscroll_bar(4, 20, 40, 100, 0).unwrap();
+        assert_eq!(start.thumb_w, 8);
+        assert_eq!(start.thumb_x, 4);
+        assert_eq!(start.max_left, 60);
+        let end = hscroll_bar(4, 20, 40, 100, 1_000).unwrap();
+        assert_eq!(end.thumb_x, 4 + 20 - 8);
+        assert!(hscroll_bar(4, 20, 40, 40, 0).is_none());
+    }
+
+    #[test]
+    fn horizontal_drag_and_wheel_stay_inside_the_line() {
+        let bar = hscroll_bar(4, 20, 40, 100, 0).unwrap();
+        assert_eq!(hscroll_left_at(bar, 4, 0), 0);
+        assert_eq!(hscroll_left_at(bar, 4 + 12, 0), 60);
+        assert_eq!(clamp_horizontal_left(-4, 100, 40), 0);
+        assert_eq!(clamp_horizontal_left(1_000, 100, 40), 60);
     }
 }

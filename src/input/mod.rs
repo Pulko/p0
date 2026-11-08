@@ -3,7 +3,7 @@ use crossterm::event::{
 };
 
 use crate::app::App;
-use crate::app::commands;
+use crate::app::commands::{self, WheelAction, WheelAxis};
 use crate::app::events;
 use crate::app::state::{Focus, Overlay};
 use crate::editor::Movement;
@@ -121,11 +121,13 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         match key.code {
             KeyCode::Up => {
                 app.explorer_selected = app.explorer_selected.saturating_sub(1);
+                commands::reveal_explorer_selection(app);
                 return;
             }
             KeyCode::Down => {
                 app.explorer_selected =
                     (app.explorer_selected + 1).min(app.explorer_entries.len().saturating_sub(1));
+                commands::reveal_explorer_selection(app);
                 return;
             }
             KeyCode::Enter => {
@@ -262,21 +264,29 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                 commands::click_explorer(app, y);
             } else if in_editor {
                 app.focus = Focus::Editor;
-                if mouse.modifiers.contains(KeyModifiers::CONTROL) {
-                    commands::click_editor(app, x, y, false);
-                    commands::go_to_definition(app);
-                } else if dbl {
-                    commands::double_click_editor(app, x, y);
-                } else {
-                    commands::click_editor(app, x, y, false);
-                    app.dragging = true;
+                if !commands::begin_hscroll_drag(app, x, y) {
+                    if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                        commands::click_editor(app, x, y, false);
+                        commands::go_to_definition(app);
+                    } else if dbl {
+                        commands::double_click_editor(app, x, y);
+                    } else {
+                        commands::click_editor(app, x, y, false);
+                        app.dragging = true;
+                    }
                 }
             }
+        }
+        MouseEventKind::Drag(MouseButton::Left) if app.hscroll_dragging => {
+            commands::drag_hscroll(app, x);
         }
         MouseEventKind::Drag(MouseButton::Left) if app.dragging => {
             commands::click_editor(app, x, y, true);
         }
-        MouseEventKind::Up(MouseButton::Left) => app.dragging = false,
+        MouseEventKind::Up(MouseButton::Left) => {
+            app.dragging = false;
+            app.hscroll_dragging = false;
+        }
         MouseEventKind::Down(MouseButton::Middle) if in_tabs => {
             if let Some(tab) = app
                 .tab_hit_boxes
@@ -291,8 +301,13 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
             commands::cancel_hover(app);
             if in_explorer {
                 app.focus = Focus::Explorer;
-                let idx = y.saturating_sub(app.explorer_area.1) as usize;
-                if idx < app.explorer_entries.len() {
+                if let Some(idx) = crate::app::state::explorer_index_at(
+                    app.explorer_scroll,
+                    app.explorer_area.1,
+                    app.explorer_area.3,
+                    y,
+                    app.explorer_entries.len(),
+                ) {
                     app.explorer_selected = idx;
                 }
                 commands::show_explorer_menu(app, x, y);
@@ -303,13 +318,75 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
             }
         }
         MouseEventKind::ScrollDown => {
-            commands::cancel_hover(app);
-            commands::scroll_editor(app, 3);
+            dispatch_wheel(
+                app,
+                mouse,
+                x,
+                y,
+                in_explorer,
+                in_editor,
+                WheelAxis::Vertical(3),
+            );
         }
         MouseEventKind::ScrollUp => {
-            commands::cancel_hover(app);
-            commands::scroll_editor(app, -3);
+            dispatch_wheel(
+                app,
+                mouse,
+                x,
+                y,
+                in_explorer,
+                in_editor,
+                WheelAxis::Vertical(-3),
+            );
+        }
+        MouseEventKind::ScrollLeft => {
+            dispatch_wheel(
+                app,
+                mouse,
+                x,
+                y,
+                in_explorer,
+                in_editor,
+                WheelAxis::Horizontal(-4),
+            );
+        }
+        MouseEventKind::ScrollRight => {
+            dispatch_wheel(
+                app,
+                mouse,
+                x,
+                y,
+                in_explorer,
+                in_editor,
+                WheelAxis::Horizontal(4),
+            );
         }
         _ => {}
     }
+}
+
+fn dispatch_wheel(
+    app: &mut App,
+    mouse: MouseEvent,
+    x: u16,
+    y: u16,
+    in_explorer: bool,
+    in_editor: bool,
+    axis: WheelAxis,
+) {
+    commands::cancel_hover(app);
+    let in_popup = in_rect(app.overlay_area, x, y) || in_rect(app.menu_area, x, y);
+    let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
+    match commands::wheel_action(in_popup, in_explorer, in_editor, shift, axis) {
+        WheelAction::Explorer(delta) => commands::scroll_explorer(app, delta),
+        WheelAction::EditorVertical(delta) => commands::scroll_editor(app, delta),
+        WheelAction::EditorHorizontal(delta) => commands::scroll_editor_horizontal(app, delta),
+        WheelAction::None => {}
+    }
+}
+
+fn in_rect(area: Option<(u16, u16, u16, u16)>, x: u16, y: u16) -> bool {
+    area.is_some_and(|(ax, ay, w, h)| {
+        x >= ax && x < ax.saturating_add(w) && y >= ay && y < ay.saturating_add(h)
+    })
 }

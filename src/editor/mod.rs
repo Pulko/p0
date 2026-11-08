@@ -13,7 +13,8 @@ pub use coords::{
 };
 pub use document::{Document, DocumentChange, DocumentId, LanguageId, LineEnding};
 pub use ops::{
-    EditorView, Movement, Selection, Viewport, delete_backward, delete_forward, delete_selection,
-    indent_for_newline, insert_text, move_cursor, position_at_display, replace_range, select_line,
-    select_word_at, selected_text, set_cursor, word_bounds,
+    EditorView, HScrollBar, Movement, Selection, Viewport, clamp_horizontal_left, delete_backward,
+    delete_forward, delete_selection, hscroll_bar, hscroll_left_at, indent_for_newline,
+    insert_text, max_line_display_width, move_cursor, position_at_display, replace_range,
+    select_line, select_word_at, selected_text, set_cursor, word_bounds,
 };

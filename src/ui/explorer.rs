@@ -10,8 +10,15 @@ use crate::workspace::GitFileStatus;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let theme = app.theme();
+    let inner_h = area.height.saturating_sub(2) as usize;
     let mut lines = Vec::new();
-    for (idx, entry) in app.explorer_entries.iter().enumerate() {
+    for (idx, entry) in app
+        .explorer_entries
+        .iter()
+        .enumerate()
+        .skip(app.explorer_scroll)
+        .take(inner_h.max(1))
+    {
         let indent = " ".repeat(entry.depth.saturating_mul(2));
         let marker = if entry.is_dir {
             if entry.expanded { "▾ " } else { "▸ " }
