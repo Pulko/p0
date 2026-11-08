@@ -9,7 +9,7 @@ use crate::language::{
     CompletionItem, LspCmd, LspStatus, completion_prefix, filter_completions, strip_snippets,
     utf16_position_to_doc,
 };
-use crate::workspace::{create_path, delete_path, find_in_document, rename_path};
+use crate::workspace::{WatchEvent, create_path, delete_path, find_in_document, rename_path};
 
 use super::state::{
     App, ConfirmAction, Focus, HScrollHit, MenuAction, MenuItem, Overlay, PromptKind,
@@ -385,7 +385,7 @@ pub fn poll_hover(app: &mut App) {
     let Some(dwell) = app.hover_dwell.clone() else {
         return;
     };
-    if dwell.since.elapsed() < std::time::Duration::from_millis(400) {
+    if dwell.since.elapsed() < super::state::HOVER_DWELL {
         return;
     }
     let Some(doc) = app.documents.get(&dwell.document_id) else {
@@ -1089,8 +1089,12 @@ fn utf16(doc: &crate::editor::Document, pos: Position) -> Position {
     )
 }
 
-pub fn handle_watch(app: &mut App, path: PathBuf) {
-    app.refresh_git_status();
+pub fn handle_watch(app: &mut App, event: WatchEvent) {
+    app.schedule_git_status();
+    if event.kind.changes_tree() {
+        app.refresh_explorer();
+    }
+    let path = event.path;
     let Some((id, dirty, known_mtime)) = app.documents.iter().find_map(|(id, doc)| {
         if doc.path.as_ref() == Some(&path) {
             Some((*id, doc.is_dirty(), doc.mtime))
@@ -1098,7 +1102,6 @@ pub fn handle_watch(app: &mut App, path: PathBuf) {
             None
         }
     }) else {
-        app.refresh_explorer();
         return;
     };
     if let Ok(meta) = std::fs::metadata(&path) {

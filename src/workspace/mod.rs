@@ -6,6 +6,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use ignore::WalkBuilder;
+use notify::event::{EventKind, ModifyKind};
 use nucleo::pattern::{CaseMatching, Normalization};
 use nucleo::{Config, Nucleo};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -20,6 +21,27 @@ pub enum GitFileStatus {
     Added,
     Deleted,
     Untracked,
+}
+
+pub type GitStatusUpdate = Result<HashMap<PathBuf, GitFileStatus>, ()>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WatchKind {
+    Create,
+    Remove,
+    Modify,
+}
+
+impl WatchKind {
+    pub fn changes_tree(self) -> bool {
+        matches!(self, WatchKind::Create | WatchKind::Remove)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WatchEvent {
+    pub path: PathBuf,
+    pub kind: WatchKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -250,7 +272,7 @@ pub fn delete_path(path: &Path) -> io::Result<()> {
     }
 }
 
-pub fn spawn_git_status(root: PathBuf, tx: mpsc::UnboundedSender<HashMap<PathBuf, GitFileStatus>>) {
+pub fn spawn_git_status(root: PathBuf, tx: mpsc::UnboundedSender<GitStatusUpdate>) {
     tokio::spawn(async move {
         let output = Command::new("git")
             .arg("-C")
@@ -258,13 +280,88 @@ pub fn spawn_git_status(root: PathBuf, tx: mpsc::UnboundedSender<HashMap<PathBuf
             .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
             .output()
             .await;
-        let statuses = output
-            .ok()
-            .filter(|out| out.status.success())
-            .map(|out| parse_git_status(&root, &out.stdout))
-            .unwrap_or_default();
-        let _ = tx.send(statuses);
+        let update = match output {
+            Ok(output) if output.status.success() => Ok(parse_git_status(&root, &output.stdout)),
+            Ok(output) => {
+                tracing::warn!("git status exited {}", output.status);
+                Err(())
+            }
+            Err(error) => {
+                tracing::warn!("git status failed: {error}");
+                Err(())
+            }
+        };
+        let _ = tx.send(update);
     });
+}
+
+pub fn classify_watch_kind(kind: EventKind) -> Option<WatchKind> {
+    match kind {
+        EventKind::Create(_) => Some(WatchKind::Create),
+        EventKind::Remove(_) => Some(WatchKind::Remove),
+        EventKind::Modify(ModifyKind::Name(_)) => Some(WatchKind::Create),
+        EventKind::Modify(_) => Some(WatchKind::Modify),
+        EventKind::Any => Some(WatchKind::Modify),
+        EventKind::Other => Some(WatchKind::Create),
+        EventKind::Access(_) => None,
+    }
+}
+
+pub fn is_watch_noise(path: &Path) -> bool {
+    if path
+        .components()
+        .any(|component| component.as_os_str() == ".git")
+    {
+        return true;
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".lock"))
+}
+
+pub fn accept_watch_path(root: &Path, path: &Path, ignore: &mut ignore::IncrementalIgnore) -> bool {
+    if is_watch_noise(path) {
+        return false;
+    }
+    let relative = if let Ok(relative) = path.strip_prefix(root) {
+        relative.to_path_buf()
+    } else if let Some(relative) = ignore.normalize(path) {
+        relative
+    } else {
+        return false;
+    };
+    if relative.as_os_str().is_empty() {
+        return false;
+    }
+    !ignore.matched(&relative, path.is_dir()).is_ignore()
+}
+
+pub fn directory_status(
+    statuses: &HashMap<PathBuf, GitFileStatus>,
+    dir: &Path,
+) -> Option<GitFileStatus> {
+    statuses
+        .iter()
+        .filter(|(path, _)| path.starts_with(dir))
+        .map(|(_, status)| *status)
+        .min_by_key(|status| match status {
+            GitFileStatus::Modified => 0,
+            GitFileStatus::Added => 1,
+            GitFileStatus::Deleted => 2,
+            GitFileStatus::Untracked => 3,
+        })
+}
+
+pub fn watch_matcher(root: &Path) -> ignore::IncrementalIgnore {
+    let mut matchers = WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .build_matchers();
+    matchers
+        .pop()
+        .expect("watch matcher for the workspace root")
 }
 
 pub fn parse_git_status(root: &Path, output: &[u8]) -> HashMap<PathBuf, GitFileStatus> {
@@ -734,6 +831,105 @@ mod tests {
         let changes = classify_lines("", "alpha\nbeta");
         assert_eq!(changes.marks, vec![LineMark::Added, LineMark::Added]);
         assert!(changes.deleted_before.iter().all(|count| *count == 0));
+    }
+
+    #[test]
+    fn folder_mark_prefers_modified_and_stays_inside_the_directory() {
+        let root = Path::new("/repo");
+        let mut statuses = HashMap::new();
+        statuses.insert(root.join("src/notes.txt"), GitFileStatus::Untracked);
+        statuses.insert(root.join("src/main.ts"), GitFileStatus::Modified);
+        statuses.insert(root.join("src2/other.ts"), GitFileStatus::Added);
+        assert_eq!(
+            directory_status(&statuses, &root.join("src")),
+            Some(GitFileStatus::Modified)
+        );
+        assert_eq!(
+            directory_status(&statuses, &root.join("src2")),
+            Some(GitFileStatus::Added)
+        );
+        assert_eq!(directory_status(&statuses, &root.join("empty")), None);
+    }
+
+    #[test]
+    fn classifies_watch_events_and_drops_noise() {
+        use notify::event::{AccessKind, CreateKind, DataChange, RemoveKind, RenameMode};
+
+        assert_eq!(
+            classify_watch_kind(EventKind::Create(CreateKind::File)),
+            Some(WatchKind::Create)
+        );
+        assert_eq!(
+            classify_watch_kind(EventKind::Remove(RemoveKind::File)),
+            Some(WatchKind::Remove)
+        );
+        assert_eq!(
+            classify_watch_kind(EventKind::Modify(ModifyKind::Data(DataChange::Content))),
+            Some(WatchKind::Modify)
+        );
+        assert_eq!(
+            classify_watch_kind(EventKind::Modify(ModifyKind::Name(RenameMode::Any))),
+            Some(WatchKind::Create)
+        );
+        assert_eq!(classify_watch_kind(EventKind::Any), Some(WatchKind::Modify));
+        assert_eq!(
+            classify_watch_kind(EventKind::Other),
+            Some(WatchKind::Create)
+        );
+        assert_eq!(
+            classify_watch_kind(EventKind::Access(AccessKind::Read)),
+            None
+        );
+        assert!(WatchKind::Create.changes_tree());
+        assert!(WatchKind::Remove.changes_tree());
+        assert!(!WatchKind::Modify.changes_tree());
+
+        let root = Path::new("/repo");
+        assert!(is_watch_noise(&root.join(".git/index")));
+        assert!(is_watch_noise(&root.join(".git/index.lock")));
+        assert!(is_watch_noise(&root.join("index.lock")));
+        assert!(!is_watch_noise(&root.join("src/main.rs")));
+    }
+
+    #[test]
+    fn watch_filter_skips_gitignored_paths() {
+        struct TempDir(PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let temp = TempDir(std::env::temp_dir().join(format!("p0-watch-{}", uuid::Uuid::new_v4())));
+        std::fs::create_dir_all(temp.0.join(".git")).unwrap();
+        std::fs::create_dir_all(temp.0.join("target")).unwrap();
+        std::fs::create_dir_all(temp.0.join("src")).unwrap();
+        std::fs::write(temp.0.join(".gitignore"), "/target\n*.p0tmp\n").unwrap();
+        std::fs::write(temp.0.join("target/out"), "x").unwrap();
+        std::fs::write(temp.0.join("src/main.rs"), "x").unwrap();
+        std::fs::write(temp.0.join("notes.p0tmp"), "x").unwrap();
+        let root = temp.0.canonicalize().unwrap();
+        let mut ignore = watch_matcher(&root);
+        assert!(accept_watch_path(
+            &root,
+            &root.join("src/main.rs"),
+            &mut ignore
+        ));
+        assert!(!accept_watch_path(
+            &root,
+            &root.join("target/out"),
+            &mut ignore
+        ));
+        assert!(!accept_watch_path(
+            &root,
+            &root.join("notes.p0tmp"),
+            &mut ignore
+        ));
+        assert!(!accept_watch_path(
+            &root,
+            &root.join(".git/HEAD"),
+            &mut ignore
+        ));
     }
 
     #[test]

@@ -29,7 +29,9 @@ use tracing_subscriber::EnvFilter;
 
 use app::App;
 use app::config::log_path;
+use app::state::HOVER_DWELL;
 use language::{LanguageClient, LspCmd};
+use workspace::{WatchEvent, accept_watch_path, classify_watch_kind, watch_matcher};
 
 struct TerminalGuard;
 
@@ -70,16 +72,25 @@ fn setup_logging() {
     }
 }
 
-fn spawn_watcher(root: PathBuf) -> mpsc::UnboundedReceiver<PathBuf> {
+fn spawn_watcher(root: PathBuf) -> mpsc::UnboundedReceiver<WatchEvent> {
     let (tx, rx) = mpsc::unbounded_channel();
     std::thread::spawn(move || {
+        let mut ignore = watch_matcher(&root);
         let tx2 = tx.clone();
+        let watch_root = root.clone();
         let mut watcher =
             match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-                if let Ok(event) = res {
-                    for path in event.paths {
-                        let _ = tx2.send(path);
+                let Ok(event) = res else {
+                    return;
+                };
+                let Some(kind) = classify_watch_kind(event.kind) else {
+                    return;
+                };
+                for path in event.paths {
+                    if !accept_watch_path(&watch_root, &path, &mut ignore) {
+                        continue;
                     }
+                    let _ = tx2.send(WatchEvent { path, kind });
                 }
             }) {
                 Ok(w) => w,
@@ -97,6 +108,13 @@ fn spawn_watcher(root: PathBuf) -> mpsc::UnboundedReceiver<PathBuf> {
         }
     });
     rx
+}
+
+async fn ready_in(delay: Option<Duration>) {
+    match delay {
+        Some(delay) => tokio::time::sleep(delay).await,
+        None => std::future::pending().await,
+    }
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -144,6 +162,11 @@ async fn main() -> anyhow::Result<()> {
     let mut events = EventStream::new();
     while !app.should_quit {
         terminal.draw(|frame| ui::draw(frame, &mut app))?;
+        let hover_delay = app
+            .hover_dwell
+            .as_ref()
+            .map(|dwell| HOVER_DWELL.saturating_sub(dwell.since.elapsed()));
+        let git_delay = app.git_status_delay();
         tokio::select! {
             event = events.next() => {
                 if let Some(Ok(event)) = event {
@@ -164,7 +187,7 @@ async fn main() -> anyhow::Result<()> {
             }
             statuses = git_status_rx.recv() => {
                 if let Some(statuses) = statuses {
-                    app.git_status = statuses;
+                    app.receive_git_status(statuses);
                 }
             }
             diff = diff_rx.recv() => {
@@ -172,13 +195,16 @@ async fn main() -> anyhow::Result<()> {
                     app.receive_diff(diff);
                 }
             }
-            path = watch_rx.recv() => {
-                if let Some(path) = path {
-                    app::commands::handle_watch(&mut app, path);
+            event = watch_rx.recv() => {
+                if let Some(event) = event {
+                    app::commands::handle_watch(&mut app, event);
                 }
             }
-            _ = tokio::time::sleep(Duration::from_millis(80)) => {
+            _ = ready_in(hover_delay) => {
                 app::commands::poll_hover(&mut app);
+            }
+            _ = ready_in(git_delay) => {
+                app.pump_git_status();
             }
         }
     }

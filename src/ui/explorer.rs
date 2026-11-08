@@ -43,10 +43,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                 })
         });
         let git = if entry.is_dir {
-            app.git_status
-                .iter()
-                .find(|(path, _)| path.starts_with(&entry.path))
-                .map(|(_, status)| *status)
+            crate::workspace::directory_status(&app.git_status, &entry.path)
         } else {
             app.git_status.get(&entry.path).copied()
         };

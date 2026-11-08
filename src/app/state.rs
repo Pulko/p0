@@ -167,6 +167,9 @@ pub struct DiffView {
     pub loading: bool,
 }
 
+pub const HOVER_DWELL: Duration = Duration::from_millis(400);
+const GIT_STATUS_DEBOUNCE: Duration = Duration::from_secs(1);
+
 #[derive(Clone, Debug)]
 pub struct HoverDwell {
     pub document_id: DocumentId,
@@ -219,9 +222,12 @@ pub struct App {
     pub hover_dwell: Option<HoverDwell>,
     pub hover_anchor: Option<(u64, u16, u16, Position)>,
     pub search_tx: mpsc::UnboundedSender<Vec<SearchMatch>>,
-    pub git_status_tx: mpsc::UnboundedSender<HashMap<PathBuf, GitFileStatus>>,
+    pub git_status_tx: mpsc::UnboundedSender<crate::workspace::GitStatusUpdate>,
     pub diff_tx: mpsc::UnboundedSender<GitDiffResult>,
     pub git_status: HashMap<PathBuf, GitFileStatus>,
+    git_status_running: bool,
+    git_status_again: bool,
+    git_status_at: Option<Instant>,
     pub diff_view: Option<DiffView>,
     pub gutter_width: u16,
     pub menu_area: Option<(u16, u16, u16, u16)>,
@@ -279,6 +285,9 @@ impl App {
             git_status_tx,
             diff_tx,
             git_status: HashMap::new(),
+            git_status_running: false,
+            git_status_again: false,
+            git_status_at: None,
             diff_view: None,
             gutter_width: 4,
             menu_area: None,
@@ -298,7 +307,6 @@ impl App {
         };
         app.file_finder.set_files(&app.workspace_files);
         app.refresh_explorer();
-        app.refresh_git_status();
         let _ = app.lsp.tx.send(LspCmd::Initialize {
             root: app.root.clone(),
         });
@@ -316,8 +324,49 @@ impl App {
             clamp_explorer_scroll(self.explorer_scroll, self.explorer_entries.len(), inner);
     }
 
-    pub fn refresh_git_status(&self) {
+    pub fn refresh_git_status(&mut self) {
+        self.git_status_at = Some(Instant::now());
+        self.pump_git_status();
+    }
+
+    pub fn schedule_git_status(&mut self) {
+        self.git_status_at = Some(Instant::now() + GIT_STATUS_DEBOUNCE);
+    }
+
+    pub fn git_status_delay(&self) -> Option<Duration> {
+        self.git_status_at
+            .map(|at| at.saturating_duration_since(Instant::now()))
+    }
+
+    pub fn pump_git_status(&mut self) {
+        let due = self.git_status_at.is_some_and(|at| at <= Instant::now());
+        if !due {
+            return;
+        }
+        if self.git_status_running {
+            self.git_status_again = true;
+            self.git_status_at = None;
+            return;
+        }
+        self.git_status_at = None;
+        self.git_status_running = true;
         crate::workspace::spawn_git_status(self.root.clone(), self.git_status_tx.clone());
+    }
+
+    pub fn receive_git_status(&mut self, result: crate::workspace::GitStatusUpdate) {
+        self.git_status_running = false;
+        if let Ok(statuses) = result
+            && self.git_status != statuses
+        {
+            self.git_status = statuses;
+        }
+        if self.git_status_again {
+            self.git_status_again = false;
+            if self.git_status_at.is_none() {
+                self.git_status_at = Some(Instant::now());
+            }
+            self.pump_git_status();
+        }
     }
 
     pub fn active_doc(&self) -> Option<&Document> {
