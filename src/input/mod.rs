@@ -5,7 +5,7 @@ use crossterm::event::{
 use crate::app::App;
 use crate::app::commands::{self, WheelAction, WheelAxis};
 use crate::app::events;
-use crate::app::state::{Focus, Overlay};
+use crate::app::state::{Focus, HeaderAction, Overlay};
 use crate::editor::Movement;
 
 pub fn handle_event(app: &mut App, event: Event) {
@@ -43,10 +43,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 return;
             }
             KeyCode::Char('s') | KeyCode::Char('S') => return commands::save_active(app),
-            KeyCode::Char('p') | KeyCode::Char('P') => return commands::open_file_finder(app),
-            KeyCode::Char('f') | KeyCode::Char('F') if shift => {
-                return commands::open_search_workspace(app);
-            }
+            KeyCode::Char('p') | KeyCode::Char('P') => return commands::open_search(app),
             KeyCode::Char('d') | KeyCode::Char('D') if shift => {
                 app.toggle_diff();
                 return;
@@ -185,6 +182,11 @@ fn scroll_tabs(app: &mut App, x: u16) -> bool {
 fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     let x = mouse.column;
     let y = mouse.row;
+    let in_search = app.explorer_visible
+        && x >= app.search_area.0
+        && x < app.search_area.0 + app.search_area.2
+        && y >= app.search_area.1
+        && y < app.search_area.1 + app.search_area.3;
     let in_explorer = app.explorer_visible
         && x >= app.explorer_area.0
         && x < app.explorer_area.0 + app.explorer_area.2
@@ -275,6 +277,18 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                         app.focus = Focus::Editor;
                         app.overlay = Overlay::None;
                         app.diff_view = None;
+                    }
+                }
+            } else if in_search {
+                if let Some(action) = app
+                    .header_hits
+                    .iter()
+                    .find(|hit| x >= hit.x && x < hit.x.saturating_add(hit.width))
+                    .map(|hit| hit.action)
+                {
+                    match action {
+                        HeaderAction::Find => commands::open_search(app),
+                        HeaderAction::Search => commands::open_content_search(app),
                     }
                 }
             } else if in_explorer {

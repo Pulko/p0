@@ -2,14 +2,12 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 
 use ignore::WalkBuilder;
 use notify::event::{EventKind, ModifyKind};
 use nucleo::pattern::{CaseMatching, Normalization};
 use nucleo::{Config, Nucleo};
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
@@ -123,6 +121,12 @@ pub struct SearchMatch {
     pub line: usize,
     pub column: usize,
     pub text: String,
+}
+
+pub struct WorkspaceSearch {
+    pub generation: u64,
+    pub matches: Vec<SearchMatch>,
+    pub message: Option<String>,
 }
 
 pub struct FileFinder {
@@ -645,87 +649,91 @@ fn split_lines(text: &str) -> Vec<&str> {
         .collect()
 }
 
+const MAX_SEARCH_HITS: usize = 400;
+const MAX_SEARCH_FILE: u64 = 2 * 1024 * 1024;
+
 pub fn spawn_workspace_search(
     root: PathBuf,
     query: String,
-    tx: mpsc::UnboundedSender<Vec<SearchMatch>>,
+    generation: u64,
+    tx: mpsc::UnboundedSender<WorkspaceSearch>,
 ) {
     tokio::spawn(async move {
         if query.trim().is_empty() {
-            let _ = tx.send(Vec::new());
+            let _ = tx.send(WorkspaceSearch {
+                generation,
+                matches: Vec::new(),
+                message: None,
+            });
             return;
         }
-        let mut cmd = Command::new("rg");
-        cmd.arg("--json")
-            .arg("--max-count")
-            .arg("50")
-            .arg("--max-filesize")
-            .arg("2M")
-            .arg("-S")
-            .arg("--glob")
-            .arg("!node_modules")
-            .arg("--glob")
-            .arg("!.git")
-            .arg(&query)
-            .arg(&root)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let Ok(mut child) = cmd.spawn() else {
-            let _ = tx.send(Vec::new());
-            return;
-        };
-        let stdout = child.stdout.take();
-        let mut results = Vec::new();
-        if let Some(stdout) = stdout {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if let Some(m) = parse_rg_line(&root, &line) {
-                    results.push(m);
-                    if results.len() >= 400 {
-                        break;
-                    }
-                }
-            }
-        }
-        let _ = child.kill().await;
-        let _ = tx.send(results);
+        let scanned = tokio::task::spawn_blocking(move || search_workspace(&root, &query)).await;
+        let _ = tx.send(WorkspaceSearch {
+            generation,
+            matches: scanned.unwrap_or_default(),
+            message: None,
+        });
     });
 }
 
-fn parse_rg_line(root: &Path, line: &str) -> Option<SearchMatch> {
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    if value.get("type")?.as_str()? != "match" {
-        return None;
+pub fn search_workspace(root: &Path, query: &str) -> Vec<SearchMatch> {
+    if query.trim().is_empty() {
+        return Vec::new();
     }
-    let data = value.get("data")?;
-    let path = data.get("path")?.get("text")?.as_str()?;
-    let line_number = data.get("line_number")?.as_u64()? as usize;
-    let text = data
-        .get("lines")?
-        .get("text")?
-        .as_str()
-        .unwrap_or("")
-        .trim_end()
-        .to_string();
-    let column = data
-        .get("submatches")
-        .and_then(|s| s.as_array())
-        .and_then(|a| a.first())
-        .and_then(|m| m.get("start"))
-        .and_then(|s| s.as_u64())
-        .unwrap_or(0) as usize;
-    let path = PathBuf::from(path);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        root.join(path)
-    };
-    Some(SearchMatch {
-        path,
-        line: line_number.saturating_sub(1),
-        column,
-        text,
-    })
+    let mut matches = Vec::new();
+    let walker = WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .filter_entry(|entry| !skipped_search_name(entry.file_name()))
+        .build();
+    for entry in walker.flatten() {
+        if matches.len() >= MAX_SEARCH_HITS {
+            break;
+        }
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(meta) = path.metadata() else {
+            continue;
+        };
+        if meta.len() > MAX_SEARCH_FILE {
+            continue;
+        }
+        let Ok(bytes) = fs::read(path) else {
+            continue;
+        };
+        if bytes.contains(&0) {
+            continue;
+        }
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        for (start, _) in find_in_document(&text, query, true) {
+            if matches.len() >= MAX_SEARCH_HITS {
+                break;
+            }
+            let line_text = lines
+                .get(start.line)
+                .copied()
+                .unwrap_or("")
+                .trim_end()
+                .to_string();
+            matches.push(SearchMatch {
+                path: path.to_path_buf(),
+                line: start.line,
+                column: start.column,
+                text: line_text,
+            });
+        }
+    }
+    matches
+}
+
+fn skipped_search_name(name: &std::ffi::OsStr) -> bool {
+    name == ".git" || name == "node_modules"
 }
 
 pub fn find_in_document(
@@ -766,6 +774,33 @@ pub fn find_in_document(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_search_skips_node_modules() {
+        let root = std::env::temp_dir().join(format!("p0-search-{}", uuid::Uuid::new_v4()));
+        let source = root.join("src");
+        let vendor = root.join("node_modules").join("pkg");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&vendor).unwrap();
+        std::fs::write(
+            source.join("App.tsx"),
+            "export const MainButtonProvider = 1;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            vendor.join("index.js"),
+            "export const MainButtonProvider = 2;\n",
+        )
+        .unwrap();
+
+        let found = search_workspace(&root, "MainButtonProvider");
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(found.len(), 1);
+        assert!(found[0].path.ends_with("src/App.tsx"));
+        assert_eq!(found[0].line, 0);
+        assert!(found[0].text.contains("MainButtonProvider"));
+    }
 
     #[test]
     fn finds_unicode_and_multiple() {

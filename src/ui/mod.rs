@@ -12,6 +12,12 @@ use crate::app::App;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let areas = layout::layout(frame.area(), app);
+    app.search_area = (
+        areas.search.x,
+        areas.search.y,
+        areas.search.width,
+        areas.search.height,
+    );
     app.explorer_area = (
         areas.explorer.x,
         areas.explorer.y,
@@ -37,6 +43,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         areas.status.height,
     );
     if app.explorer_visible {
+        explorer::render_search(frame, areas.search, app);
         explorer::render(frame, areas.explorer, app);
     }
     editor_view::render(frame, areas.tabs, areas.editor, app);

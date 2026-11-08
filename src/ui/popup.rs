@@ -35,42 +35,35 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         return;
     }
     match &app.overlay {
-        Overlay::FileFinder {
+        Overlay::Search {
+            kind,
             query,
-            results,
-            selected,
-        } => {
-            render_list(
-                frame,
-                frame.area(),
-                " File finder ",
-                &format!(" {query} "),
-                results,
-                *selected,
-                theme,
-            );
-        }
-        Overlay::SearchWorkspace {
-            query,
-            results,
+            files,
+            matches,
             selected,
             searching,
         } => {
-            let items: Vec<String> = results
-                .iter()
-                .map(|m| {
-                    format!(
-                        "{}:{}  {}",
-                        crate::app::App::relative_static(app, &m.path),
-                        m.line + 1,
-                        m.text
-                    )
-                })
-                .collect();
-            let title = if *searching {
-                " Workspace search (searching) "
-            } else {
-                " Workspace search "
+            let mut items = files.clone();
+            items.extend(matches.iter().map(|m| {
+                format!(
+                    "{}:{}  {}",
+                    crate::app::App::relative_static(app, &m.path),
+                    m.line + 1,
+                    m.text
+                )
+            }));
+            if matches!(kind, crate::app::state::SearchKind::Content)
+                && !*searching
+                && matches.is_empty()
+                && !query.trim().is_empty()
+            {
+                items.push("No matches".to_string());
+            }
+            let title = match (kind, *searching) {
+                (crate::app::state::SearchKind::Find, true) => " Find (searching) ",
+                (crate::app::state::SearchKind::Find, false) => " Find ",
+                (crate::app::state::SearchKind::Content, true) => " Search (searching) ",
+                (crate::app::state::SearchKind::Content, false) => " Search ",
             };
             render_list(
                 frame,
@@ -309,9 +302,9 @@ pub(crate) fn shortcut_rows() -> Vec<(&'static str, &'static str)> {
     vec![
         ("Ctrl+/", "Show this list"),
         ("Ctrl+S", "Save"),
-        ("Ctrl+P", "File finder"),
+        ("Ctrl+P", "Find"),
+        ("Click Search", "Search text in the repo"),
         ("Ctrl+F", "Search in file"),
-        ("Ctrl+Shift+F", "Search workspace"),
         ("Ctrl+G", "Go to line"),
         ("Ctrl+Space", "Completion"),
         ("Ctrl+Enter", "Go to definition"),

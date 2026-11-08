@@ -116,17 +116,33 @@ pub fn status_text(status: &LspStatus) -> String {
     }
 }
 
-pub fn handle_search_results(app: &mut App, results: Vec<crate::workspace::SearchMatch>) {
-    if let Overlay::SearchWorkspace {
-        results: out,
+pub fn handle_search_results(app: &mut App, update: crate::workspace::WorkspaceSearch) {
+    if update.generation != app.search_generation {
+        return;
+    }
+    if let Some(message) = update.message {
+        app.message = Some(message);
+    }
+    if let Overlay::Search {
+        query,
+        files,
+        matches,
         selected,
         searching,
         ..
     } = &mut app.overlay
     {
-        *out = results;
-        *selected = 0;
+        if query.trim().is_empty() {
+            return;
+        }
+        *matches = update.matches;
         *searching = false;
+        let total = files.len() + matches.len();
+        if total == 0 {
+            *selected = 0;
+        } else if *selected >= files.len() {
+            *selected = (*selected).min(total - 1);
+        }
     }
 }
 

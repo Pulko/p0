@@ -14,7 +14,7 @@ use crate::language::{
 use crate::workspace::{WatchEvent, create_path, delete_path, find_in_document, rename_path};
 
 use super::state::{
-    App, ConfirmAction, Focus, HScrollHit, MenuAction, MenuItem, Overlay, PromptKind,
+    App, ConfirmAction, Focus, HScrollHit, MenuAction, MenuItem, Overlay, PromptKind, SearchKind,
     clamp_explorer_scroll, decode_diagnostic_pos, explorer_index_at, explorer_inner_rows,
     is_ident_char, max_explorer_scroll,
 };
@@ -268,14 +268,28 @@ pub fn paste(app: &mut App) {
     }
 }
 
-pub fn open_file_finder(app: &mut App) {
+pub fn open_search(app: &mut App) {
     app.workspace_files = crate::workspace::list_workspace_files(&app.root);
     app.file_finder.set_files(&app.workspace_files);
-    let results = app.file_finder.query("");
-    app.overlay = Overlay::FileFinder {
+    let files = app.file_finder.query("");
+    app.overlay = Overlay::Search {
+        kind: SearchKind::Find,
         query: String::new(),
-        results,
+        files,
+        matches: Vec::new(),
         selected: 0,
+        searching: false,
+    };
+}
+
+pub fn open_content_search(app: &mut App) {
+    app.overlay = Overlay::Search {
+        kind: SearchKind::Content,
+        query: String::new(),
+        files: Vec::new(),
+        matches: Vec::new(),
+        selected: 0,
+        searching: false,
     };
 }
 
@@ -284,15 +298,6 @@ pub fn open_search_file(app: &mut App) {
         query: String::new(),
         matches: Vec::new(),
         current: 0,
-    };
-}
-
-pub fn open_search_workspace(app: &mut App) {
-    app.overlay = Overlay::SearchWorkspace {
-        query: String::new(),
-        results: Vec::new(),
-        selected: 0,
-        searching: false,
     };
 }
 
@@ -721,9 +726,8 @@ pub fn submit_prompt(app: &mut App) {
 
 pub fn overlay_char(app: &mut App, ch: char) {
     match &mut app.overlay {
-        Overlay::FileFinder { query, .. }
+        Overlay::Search { query, .. }
         | Overlay::SearchFile { query, .. }
-        | Overlay::SearchWorkspace { query, .. }
         | Overlay::Prompt { input: query, .. } => {
             query.push(ch);
         }
@@ -739,9 +743,8 @@ pub fn overlay_char(app: &mut App, ch: char) {
 
 fn overlay_backspace(app: &mut App) -> bool {
     let handled = match &mut app.overlay {
-        Overlay::FileFinder { query, .. }
+        Overlay::Search { query, .. }
         | Overlay::SearchFile { query, .. }
-        | Overlay::SearchWorkspace { query, .. }
         | Overlay::GoToLine { input: query }
         | Overlay::Prompt { input: query, .. } => {
             query.pop();
@@ -761,14 +764,36 @@ fn overlay_backspace(app: &mut App) -> bool {
 
 fn refresh_overlay_query(app: &mut App) {
     match app.overlay.clone() {
-        Overlay::FileFinder {
-            query, selected, ..
+        Overlay::Search {
+            kind,
+            query,
+            selected,
+            matches,
+            ..
         } => {
-            let results = app.file_finder.query(&query);
-            app.overlay = Overlay::FileFinder {
+            let files = if kind == SearchKind::Find {
+                app.file_finder.query(&query)
+            } else {
+                Vec::new()
+            };
+            let searching = !query.trim().is_empty();
+            let matches = if searching { matches } else { Vec::new() };
+            app.search_generation = app.search_generation.wrapping_add(1);
+            if searching {
+                crate::workspace::spawn_workspace_search(
+                    app.root.clone(),
+                    query.clone(),
+                    app.search_generation,
+                    app.search_tx.clone(),
+                );
+            }
+            app.overlay = Overlay::Search {
+                kind,
                 query,
-                results,
-                selected: selected.min(0),
+                selected: clamp_search_selected(selected, files.len(), matches.len()),
+                files,
+                matches,
+                searching,
             };
         }
         Overlay::SearchFile { query, current, .. } => {
@@ -783,25 +808,16 @@ fn refresh_overlay_query(app: &mut App) {
             };
             jump_search(app);
         }
-        Overlay::SearchWorkspace {
-            query,
-            selected,
-            results,
-            ..
-        } => {
-            crate::workspace::spawn_workspace_search(
-                app.root.clone(),
-                query.clone(),
-                app.search_tx.clone(),
-            );
-            app.overlay = Overlay::SearchWorkspace {
-                query,
-                results,
-                selected,
-                searching: true,
-            };
-        }
         _ => {}
+    }
+}
+
+fn clamp_search_selected(selected: usize, files: usize, matches: usize) -> usize {
+    let total = files + matches;
+    if total == 0 {
+        0
+    } else {
+        selected.min(total - 1)
     }
 }
 
@@ -809,7 +825,7 @@ fn overlay_move(app: &mut App, movement: Movement) {
     let down = matches!(movement, Movement::Down | Movement::Right);
     let up = matches!(movement, Movement::Up | Movement::Left);
     match &mut app.overlay {
-        Overlay::FileFinder { selected, .. } | Overlay::SearchWorkspace { selected, .. } => {
+        Overlay::Search { selected, .. } => {
             if down {
                 *selected = selected.saturating_add(1);
             }
@@ -860,31 +876,37 @@ fn overlay_move(app: &mut App, movement: Movement) {
         }
         _ => {}
     }
-    if let Overlay::FileFinder {
-        results, selected, ..
+    if let Overlay::Search {
+        files,
+        matches,
+        selected,
+        ..
     } = &mut app.overlay
     {
-        if !results.is_empty() {
-            *selected = (*selected).min(results.len() - 1);
-        }
-    }
-    if let Overlay::SearchWorkspace {
-        results, selected, ..
-    } = &mut app.overlay
-    {
-        if !results.is_empty() {
-            *selected = (*selected).min(results.len() - 1);
+        let total = files.len() + matches.len();
+        if total > 0 {
+            *selected = (*selected).min(total - 1);
         }
     }
 }
 
 pub fn overlay_submit(app: &mut App) {
     match app.overlay.clone() {
-        Overlay::FileFinder {
-            results, selected, ..
+        Overlay::Search {
+            files,
+            matches,
+            selected,
+            ..
         } => {
-            if let Some(path) = results.get(selected) {
-                app.open_path(app.root.join(path));
+            if selected < files.len() {
+                if let Some(path) = files.get(selected) {
+                    app.open_path(app.root.join(path));
+                }
+            } else if let Some(item) = matches.get(selected - files.len()).cloned() {
+                app.open_path(item.path);
+                if let Some(id) = app.active {
+                    jump_to(app, id, Position::new(item.line, item.column));
+                }
             }
             app.overlay = Overlay::None;
         }
@@ -892,16 +914,6 @@ pub fn overlay_submit(app: &mut App) {
             if let Ok(line) = input.parse::<usize>() {
                 let Some(id) = app.active else { return };
                 jump_to(app, id, Position::new(line.saturating_sub(1), 0));
-            }
-            app.overlay = Overlay::None;
-        }
-        Overlay::SearchWorkspace {
-            results, selected, ..
-        } => {
-            if let Some(item) = results.get(selected).cloned() {
-                app.open_path(item.path);
-                let Some(id) = app.active else { return };
-                jump_to(app, id, Position::new(item.line, item.column));
             }
             app.overlay = Overlay::None;
         }

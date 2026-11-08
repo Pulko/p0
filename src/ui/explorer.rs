@@ -7,9 +7,37 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
-use crate::app::state::Focus;
+use crate::app::state::{Focus, HeaderAction, HeaderHit};
 use crate::ui::theme::Theme;
 use crate::workspace::GitFileStatus;
+
+pub fn render_search(frame: &mut Frame, area: Rect, app: &mut App) {
+    app.header_hits.clear();
+    let theme = app.theme();
+    let accent = Style::default().fg(theme.accent).bg(theme.bg);
+    let find = " Find ";
+    let search = " Search ";
+    let find_width = UnicodeWidthStr::width(find) as u16;
+    let search_width = UnicodeWidthStr::width(search) as u16;
+    app.header_hits.push(HeaderHit {
+        action: HeaderAction::Find,
+        x: area.x,
+        width: find_width,
+    });
+    app.header_hits.push(HeaderHit {
+        action: HeaderAction::Search,
+        x: area.x.saturating_add(find_width).saturating_add(1),
+        width: search_width,
+    });
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(find, accent),
+            Span::styled(" ", Style::default().bg(theme.bg)),
+            Span::styled(search, accent),
+        ])),
+        area,
+    );
+}
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let theme = app.theme();

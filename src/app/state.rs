@@ -63,24 +63,40 @@ pub enum MenuAction {
     DeletePath,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchKind {
+    Find,
+    Content,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeaderAction {
+    Find,
+    Search,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeaderHit {
+    pub action: HeaderAction,
+    pub x: u16,
+    pub width: u16,
+}
+
 #[derive(Clone, Debug)]
 pub enum Overlay {
     None,
-    FileFinder {
+    Search {
+        kind: SearchKind,
         query: String,
-        results: Vec<String>,
+        files: Vec<String>,
+        matches: Vec<SearchMatch>,
         selected: usize,
+        searching: bool,
     },
     SearchFile {
         query: String,
         matches: Vec<(Position, Position)>,
         current: usize,
-    },
-    SearchWorkspace {
-        query: String,
-        results: Vec<SearchMatch>,
-        selected: usize,
-        searching: bool,
     },
     GoToLine {
         input: String,
@@ -206,10 +222,12 @@ pub struct App {
     pub message: Option<String>,
     pub should_quit: bool,
     pub editor_area: (u16, u16, u16, u16),
+    pub search_area: (u16, u16, u16, u16),
     pub explorer_area: (u16, u16, u16, u16),
     pub tabs_area: (u16, u16, u16, u16),
     pub status_area: (u16, u16, u16, u16),
     pub status_hits: Vec<StatusHit>,
+    pub header_hits: Vec<HeaderHit>,
     pub overlay_area: Option<(u16, u16, u16, u16)>,
     pub overlay_rows: Vec<(usize, u16)>,
     pub tab_hit_boxes: Vec<TabHitBox>,
@@ -227,7 +245,8 @@ pub struct App {
     pub hover_token: u64,
     pub hover_dwell: Option<HoverDwell>,
     pub hover_anchor: Option<(u64, u16, u16, Position)>,
-    pub search_tx: mpsc::UnboundedSender<Vec<SearchMatch>>,
+    pub search_generation: u64,
+    pub search_tx: mpsc::UnboundedSender<crate::workspace::WorkspaceSearch>,
     pub git_status_tx: mpsc::UnboundedSender<crate::workspace::GitStatusUpdate>,
     pub diff_tx: mpsc::UnboundedSender<GitDiffResult>,
     pub git_status: HashMap<PathBuf, GitFileStatus>,
@@ -270,10 +289,12 @@ impl App {
             message: None,
             should_quit: false,
             editor_area: (0, 0, 0, 0),
+            search_area: (0, 0, 0, 0),
             explorer_area: (0, 0, 0, 0),
             tabs_area: (0, 0, 0, 0),
             status_area: (0, 0, 0, 0),
             status_hits: Vec::new(),
+            header_hits: Vec::new(),
             overlay_area: None,
             overlay_rows: Vec::new(),
             tab_hit_boxes: Vec::new(),
@@ -291,6 +312,7 @@ impl App {
             hover_token: 0,
             hover_dwell: None,
             hover_anchor: None,
+            search_generation: 0,
             search_tx,
             git_status_tx,
             diff_tx,

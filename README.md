@@ -18,9 +18,8 @@ Click to place the cursor. Type to insert. There are no modes.
 | Action | Shortcut |
 | --- | --- |
 | Save | Ctrl+S |
-| File finder | Ctrl+P |
+| Find | Ctrl+P |
 | Search in file | Ctrl+F |
-| Search workspace | Ctrl+Shift+F |
 | Go to line | Ctrl+G |
 | Completion | Ctrl+Space |
 | Go to definition | Ctrl+Enter or Ctrl+Click |
@@ -36,7 +35,7 @@ Click to place the cursor. Type to insert. There are no modes.
 | Shortcuts | Ctrl+/ |
 | Close a popup | Esc |
 
-Click **Help** in the status bar for the same list. Click the theme name there to choose `p0`, `light`, `contrast`, `ocean`, or `ember`.
+Click **Find** above the explorer, or press Ctrl+P, to find a file by name and then matching text. Click **Search** there to search text across the repo. That skips `node_modules`, `.git`, and gitignored paths. Click **Help** in the status bar for the shortcut list. Click the theme name there to choose `p0`, `light`, `contrast`, `ocean`, or `ember`.
 
 Right-click a symbol for its type, Go to Definition, and Find References. Click a gutter mark to show the previous lines, and click again to hide them. A red underline is an error and a yellow one is a warning; the status bar shows that message at the cursor, and pausing the mouse shows the full text.
 
@@ -53,7 +52,7 @@ theme = "p0"
 
 ## Optional
 
-Workspace search uses `rg`. Types and completion use the TypeScript language server. Editing continues if either is missing.
+Types and completion use the TypeScript language server. Editing continues if it is missing.
 
 ```bash
 npm install -g typescript typescript-language-server
