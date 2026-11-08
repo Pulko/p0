@@ -345,15 +345,22 @@ pub fn schedule_hover(app: &mut App, x: u16, y: u16) {
         cancel_hover(app);
         return;
     };
-    let Some(doc) = app.documents.get(&document_id) else {
-        return;
+    let (range, path) = {
+        let Some(doc) = app.documents.get(&document_id) else {
+            return;
+        };
+        (word_bounds(&doc.rope, position), doc.path.clone())
     };
-    let range = word_bounds(&doc.rope, position);
-    if range.is_empty() {
+    let diagnostic_anchor = path.as_ref().and_then(|path| {
+        app.diagnostics.get(path).and_then(|items| {
+            crate::language::diagnostic_at(items, position).map(|item| item.range_start)
+        })
+    });
+    if range.is_empty() && diagnostic_anchor.is_none() {
         cancel_hover(app);
         return;
     }
-    let symbol_position = range.start;
+    let symbol_position = diagnostic_anchor.unwrap_or(range.start);
     if app
         .hover_dwell
         .as_ref()
@@ -381,6 +388,53 @@ pub fn cancel_hover(app: &mut App) {
     }
 }
 
+fn wrap_plain(text: &str, width: usize) -> String {
+    let width = width.max(8);
+    let mut lines = Vec::new();
+    for raw in text.split('\n') {
+        let paragraph = raw.trim_end_matches('\r');
+        if paragraph.trim().is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+        let mut current = String::new();
+        for word in paragraph.split_whitespace() {
+            if current.is_empty() {
+                take_word(&mut lines, &mut current, word, width);
+            } else if current.chars().count() + 1 + word.chars().count() <= width {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                lines.push(std::mem::take(&mut current));
+                take_word(&mut lines, &mut current, word, width);
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+    }
+    lines.join("\n")
+}
+
+fn take_word(lines: &mut Vec<String>, current: &mut String, word: &str, width: usize) {
+    if word.chars().count() <= width {
+        *current = word.to_string();
+        return;
+    }
+    let mut rest = word;
+    while rest.chars().count() > width {
+        let split = rest
+            .char_indices()
+            .nth(width)
+            .map(|(index, _)| index)
+            .unwrap_or(rest.len());
+        let (head, tail) = rest.split_at(split);
+        lines.push(head.to_string());
+        rest = tail;
+    }
+    *current = rest.to_string();
+}
+
 pub fn poll_hover(app: &mut App) {
     let Some(dwell) = app.hover_dwell.clone() else {
         return;
@@ -388,11 +442,32 @@ pub fn poll_hover(app: &mut App) {
     if dwell.since.elapsed() < super::state::HOVER_DWELL {
         return;
     }
-    let Some(doc) = app.documents.get(&dwell.document_id) else {
+    let Some(path) = app
+        .documents
+        .get(&dwell.document_id)
+        .and_then(|doc| doc.path.clone())
+    else {
         app.hover_dwell = None;
         return;
     };
-    let Some(path) = doc.path.clone() else {
+    if let Some(diagnostic) = app
+        .diagnostics
+        .get(&path)
+        .and_then(|items| crate::language::diagnostic_at(items, dwell.position))
+        .cloned()
+    {
+        app.hover_dwell = None;
+        app.hover_anchor = None;
+        app.overlay = Overlay::Hover {
+            title: crate::language::diagnostic_label(diagnostic.severity).into(),
+            text: wrap_plain(diagnostic.message.trim(), 64),
+            origin: dwell.position,
+            x: dwell.screen_x,
+            y: dwell.screen_y,
+        };
+        return;
+    }
+    let Some(doc) = app.documents.get(&dwell.document_id) else {
         app.hover_dwell = None;
         return;
     };

@@ -90,6 +90,7 @@ pub enum Overlay {
         origin: Position,
     },
     Hover {
+        title: String,
         text: String,
         origin: Position,
         x: u16,

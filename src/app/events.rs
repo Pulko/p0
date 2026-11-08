@@ -64,7 +64,13 @@ pub fn handle_lsp(app: &mut App, event: LspEvent) {
                 && let Some((anchor_token, x, y, origin)) = app.hover_anchor
                 && anchor_token == token
             {
-                app.overlay = Overlay::Hover { text, origin, x, y };
+                app.overlay = Overlay::Hover {
+                    title: "Type info".into(),
+                    text,
+                    origin,
+                    x,
+                    y,
+                };
             }
         }
         LspEvent::Signature { text, .. } => {

@@ -113,7 +113,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             );
         }
         Overlay::Completion { .. } => {}
-        Overlay::Hover { text, x, y, .. } => {
+        Overlay::Hover {
+            title, text, x, y, ..
+        } => {
             let content = parse_hover_content(text);
             let width = content
                 .iter()
@@ -153,11 +155,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     Line::from(Span::styled(line, style))
                 })
                 .collect();
+            let heading = format!(" {title} ");
             frame.render_widget(
                 Paragraph::new(lines)
                     .style(theme.text())
                     .wrap(Wrap { trim: false })
-                    .block(theme.panel(" Type info ")),
+                    .block(theme.panel(&heading)),
                 area,
             );
         }

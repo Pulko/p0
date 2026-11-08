@@ -31,6 +31,44 @@ pub struct Diagnostic {
     pub message: String,
 }
 
+pub fn diagnostic_label(severity: u8) -> &'static str {
+    match severity {
+        2 => "Warning",
+        3 => "Info",
+        4 => "Hint",
+        _ => "Error",
+    }
+}
+
+pub fn diagnostic_status(item: &Diagnostic) -> String {
+    let message = item.message.replace(['\n', '\r'], " ");
+    format!("{} {message}", diagnostic_label(item.severity))
+}
+
+pub fn diagnostic_at<'a>(items: &'a [Diagnostic], pos: Position) -> Option<&'a Diagnostic> {
+    items
+        .iter()
+        .filter(|item| diagnostic_contains(item, pos))
+        .min_by_key(|item| severity_rank(item.severity))
+}
+
+fn severity_rank(severity: u8) -> u8 {
+    match severity {
+        1..=4 => severity,
+        _ => 1,
+    }
+}
+
+fn diagnostic_contains(item: &Diagnostic, pos: Position) -> bool {
+    let start = item.range_start;
+    let end = if item.range_end > start {
+        item.range_end
+    } else {
+        Position::new(start.line, start.column.saturating_add(1))
+    };
+    pos >= start && pos < end
+}
+
 #[derive(Clone, Debug)]
 pub struct CompletionEdit {
     pub start: Position,
@@ -1131,5 +1169,47 @@ mod tests {
         assert_eq!(completion_kind_tag(Some(6)), "var");
         assert_eq!(completion_kind_tag(Some(7)), "type");
         assert_eq!(completion_kind_tag(Some(14)), "kw");
+    }
+
+    fn diag(start: (usize, usize), end: (usize, usize), severity: u8, message: &str) -> Diagnostic {
+        Diagnostic {
+            path: PathBuf::from("a.ts"),
+            range_start: Position::new(start.0, start.1),
+            range_end: Position::new(end.0, end.1),
+            severity,
+            message: message.into(),
+        }
+    }
+
+    #[test]
+    fn diagnostic_at_covers_start_middle_and_end_lines() {
+        let items = vec![diag((1, 4), (3, 2), 1, "broken")];
+        assert_eq!(
+            diagnostic_at(&items, Position::new(1, 4)).map(|item| item.message.as_str()),
+            Some("broken")
+        );
+        assert_eq!(
+            diagnostic_at(&items, Position::new(2, 0)).map(|item| item.message.as_str()),
+            Some("broken")
+        );
+        assert_eq!(
+            diagnostic_at(&items, Position::new(3, 1)).map(|item| item.message.as_str()),
+            Some("broken")
+        );
+        assert!(diagnostic_at(&items, Position::new(1, 3)).is_none());
+        assert!(diagnostic_at(&items, Position::new(3, 2)).is_none());
+        assert!(diagnostic_at(&items, Position::new(4, 0)).is_none());
+    }
+
+    #[test]
+    fn diagnostic_at_prefers_the_error_when_ranges_overlap() {
+        let items = vec![
+            diag((0, 0), (0, 8), 2, "careful"),
+            diag((0, 2), (0, 6), 1, "broken"),
+        ];
+        let hit = diagnostic_at(&items, Position::new(0, 3)).unwrap();
+        assert_eq!(hit.message, "broken");
+        assert_eq!(diagnostic_label(hit.severity), "Error");
+        assert_eq!(diagnostic_status(&items[0]), "Warning careful");
     }
 }

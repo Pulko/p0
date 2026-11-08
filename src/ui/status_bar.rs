@@ -60,7 +60,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     } else {
         Style::default().fg(theme.fg_muted)
     };
-    let msg = app.message.clone().unwrap_or_default();
+    let msg = cursor_diagnostic(app)
+        .or_else(|| app.message.clone())
+        .unwrap_or_default();
     let mut left = vec![
         Piece {
             text: if app.diff_view.is_some() {
@@ -168,6 +170,15 @@ fn fit_left(left: &mut [Piece], right: &[Piece], width: u16) {
         }
         used = used.saturating_add(chars(&piece.text));
     }
+}
+
+fn cursor_diagnostic(app: &App) -> Option<String> {
+    let doc = app.active_doc()?;
+    let view = app.active_view()?;
+    let path = doc.path.as_ref()?;
+    let items = app.diagnostics.get(path)?;
+    let diagnostic = crate::language::diagnostic_at(items, view.cursor)?;
+    Some(crate::language::diagnostic_status(diagnostic))
 }
 
 fn chars(text: &str) -> u16 {

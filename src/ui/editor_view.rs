@@ -408,12 +408,12 @@ fn paint_line(
                 }
             }
         }
-        if diags.iter().any(|d| {
-            d.range_start.line == line_idx
-                && start_col >= d.range_start.column
-                && start_col < d.range_end.column.max(d.range_start.column + 1)
-        }) {
-            style = style.add_modifier(Modifier::UNDERLINED).fg(theme.deleted);
+        if let Some(diag) =
+            crate::language::diagnostic_at(diags, crate::editor::Position::new(line_idx, start_col))
+        {
+            style = style
+                .add_modifier(Modifier::UNDERLINED)
+                .fg(diagnostic_color(diag.severity, theme));
         }
         let visible = if g == "\t" { " ".repeat(w) } else { g.clone() };
         out.push(Span::styled(visible, style));
@@ -426,6 +426,14 @@ fn paint_line(
         out.push(Span::styled(" ", style));
     }
     out
+}
+
+fn diagnostic_color(severity: u8, theme: Theme) -> Color {
+    match severity {
+        2 => theme.warning,
+        3 | 4 => theme.fg_dim,
+        _ => theme.deleted,
+    }
 }
 
 fn highlight_at(
