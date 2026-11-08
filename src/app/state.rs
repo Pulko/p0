@@ -38,6 +38,7 @@ pub enum ConfirmAction {
     Quit,
     Reload(DocumentId),
     Close(DocumentId),
+    CloseMany(Vec<DocumentId>),
 }
 
 #[derive(Clone, Debug)]
@@ -61,6 +62,8 @@ pub enum MenuAction {
     RenameFile,
     CopyPath,
     DeletePath,
+    CloseOthers(DocumentId),
+    CloseAll,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -536,6 +539,32 @@ impl App {
         if self.documents.contains_key(&id) {
             self.active = Some(id);
             self.close_active(force);
+        }
+    }
+
+    pub fn close_documents(&mut self, ids: &[DocumentId], force: bool) {
+        let targets: Vec<DocumentId> = ids
+            .iter()
+            .copied()
+            .filter(|id| self.documents.contains_key(id))
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        if !force
+            && targets
+                .iter()
+                .any(|id| self.documents.get(id).is_some_and(|doc| doc.is_dirty()))
+        {
+            self.overlay = Overlay::Confirm {
+                message: "Unsaved changes. Close anyway?".into(),
+                action: ConfirmAction::CloseMany(targets),
+            };
+            return;
+        }
+        for id in targets {
+            self.active = Some(id);
+            self.close_active(true);
         }
     }
 

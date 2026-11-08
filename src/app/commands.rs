@@ -605,6 +605,7 @@ pub fn confirm_yes(app: &mut App) {
             app.active = Some(id);
             app.close_active(true);
         }
+        ConfirmAction::CloseMany(ids) => app.close_documents(&ids, true),
         ConfirmAction::Reload(id) => {
             if let Some(doc) = app.documents.get(&id) {
                 if let Some(path) = doc.path.clone() {
@@ -1085,6 +1086,30 @@ pub fn show_editor_menu(app: &mut App, x: u16, y: u16) {
     }
 }
 
+pub fn show_tab_menu(app: &mut App, document_id: crate::editor::DocumentId, x: u16, y: u16) {
+    let others_open = app.order.len() > 1;
+    app.overlay = Overlay::ContextMenu {
+        x,
+        y,
+        selected: 0,
+        show_type: false,
+        type_text: String::new(),
+        hover_token: 0,
+        items: vec![
+            MenuItem {
+                label: "Close Others".into(),
+                action: MenuAction::CloseOthers(document_id),
+                enabled: others_open,
+            },
+            MenuItem {
+                label: "Close All".into(),
+                action: MenuAction::CloseAll,
+                enabled: true,
+            },
+        ],
+    };
+}
+
 pub fn show_explorer_menu(app: &mut App, x: u16, y: u16) {
     app.overlay = Overlay::ContextMenu {
         x,
@@ -1159,6 +1184,19 @@ pub fn run_menu(app: &mut App, action: MenuAction) {
             };
         }
         MenuAction::CopyPath => copy_path(app),
+        MenuAction::CloseOthers(id) => {
+            let ids: Vec<_> = app
+                .order
+                .iter()
+                .copied()
+                .filter(|open| *open != id)
+                .collect();
+            app.close_documents(&ids, false);
+        }
+        MenuAction::CloseAll => {
+            let ids = app.order.clone();
+            app.close_documents(&ids, false);
+        }
         MenuAction::DeletePath => {
             if let Some(entry) = app.explorer_entries.get(app.explorer_selected) {
                 app.overlay = Overlay::Confirm {
@@ -1513,7 +1551,28 @@ pub fn click_explorer(app: &mut App, y: u16) {
 
 #[cfg(test)]
 mod tests {
-    use super::{WheelAction, WheelAxis, editor_context_labels, wheel_action};
+    use std::path::PathBuf;
+
+    use tokio::sync::mpsc;
+
+    use crate::app::state::{App, ConfirmAction, Overlay};
+    use crate::editor::DocumentId;
+    use crate::language::LanguageClient;
+
+    use super::{
+        MenuAction, WheelAction, WheelAxis, confirm_yes, editor_context_labels, run_menu,
+        wheel_action,
+    };
+
+    fn app_with_tabs(count: usize) -> (App, Vec<DocumentId>) {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(PathBuf::from("."), LanguageClient { tx });
+        for _ in 0..count {
+            app.open_untitled();
+        }
+        let ids = app.order.clone();
+        (app, ids)
+    }
 
     #[test]
     fn editor_menu_keeps_navigation_actions_only() {
@@ -1557,5 +1616,52 @@ mod tests {
             wheel_action(false, true, false, false, WheelAxis::Horizontal(4)),
             WheelAction::None
         );
+    }
+
+    #[test]
+    fn close_others_keeps_the_clicked_tab_even_when_it_is_not_active() {
+        let (mut app, ids) = app_with_tabs(3);
+        app.active = Some(ids[0]);
+        run_menu(&mut app, MenuAction::CloseOthers(ids[1]));
+        assert_eq!(app.order, vec![ids[1]]);
+        assert_eq!(app.active, Some(ids[1]));
+    }
+
+    #[test]
+    fn close_all_clears_every_tab() {
+        let (mut app, _) = app_with_tabs(3);
+        run_menu(&mut app, MenuAction::CloseAll);
+        assert!(app.order.is_empty());
+        assert_eq!(app.active, None);
+    }
+
+    #[test]
+    fn close_others_confirms_before_dropping_a_dirty_tab() {
+        let (mut app, ids) = app_with_tabs(3);
+        app.documents.get_mut(&ids[2]).unwrap().revision = 1;
+        run_menu(&mut app, MenuAction::CloseOthers(ids[1]));
+        match &app.overlay {
+            Overlay::Confirm {
+                action: ConfirmAction::CloseMany(targets),
+                ..
+            } => {
+                assert_eq!(targets, &vec![ids[0], ids[2]]);
+            }
+            other => panic!("expected confirm, got {other:?}"),
+        }
+        assert_eq!(app.order, ids);
+        confirm_yes(&mut app);
+        assert_eq!(app.order, vec![ids[1]]);
+        assert_eq!(app.active, Some(ids[1]));
+    }
+
+    #[test]
+    fn close_others_skips_the_prompt_when_only_the_kept_tab_is_dirty() {
+        let (mut app, ids) = app_with_tabs(2);
+        app.documents.get_mut(&ids[0]).unwrap().revision = 1;
+        run_menu(&mut app, MenuAction::CloseOthers(ids[0]));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(app.order, vec![ids[0]]);
+        assert_eq!(app.active, Some(ids[0]));
     }
 }

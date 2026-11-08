@@ -322,7 +322,16 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
         }
         MouseEventKind::Down(MouseButton::Right) => {
             commands::cancel_hover(app);
-            if in_explorer {
+            if in_tabs {
+                if let Some(tab) = app
+                    .tab_hit_boxes
+                    .iter()
+                    .find(|tab| x >= tab.x && x < tab.x + tab.width)
+                    .copied()
+                {
+                    commands::show_tab_menu(app, tab.document_id, x, y);
+                }
+            } else if in_explorer {
                 app.focus = Focus::Explorer;
                 if let Some(idx) = crate::app::state::explorer_index_at(
                     app.explorer_scroll,
