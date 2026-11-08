@@ -3,9 +3,11 @@
 A mouse-driven terminal IDE for TypeScript and JavaScript on macOS.
 
 ```bash
-cargo install p0
+cargo install p0-ide
 p0
 ```
+
+The crates.io package is `p0-ide`. The command it installs is `p0`.
 
 That opens the current directory. Pass a path to open another project. Hyper is the terminal it is built for.
 

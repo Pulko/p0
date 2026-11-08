@@ -1,13 +1,18 @@
 [package]
-name = "p0"
+name = "p0-ide"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "A mouse-driven terminal IDE for TypeScript and JavaScript on macOS."
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/Pulko/p0"
 readme = "README.md"
 keywords = ["editor", "terminal", "typescript", "ide"]
 categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "p0"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.104"

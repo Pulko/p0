@@ -1293,7 +1293,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "p0"
+name = "p0-ide"
 version = "0.1.0"
 dependencies = [
  "anyhow",
