@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 
+use ropey::Rope;
+
 use crate::editor::{
-    HScrollBar, Movement, Position, Range, Selection, clamp_horizontal_left, delete_backward,
-    delete_forward, hscroll_left_at, indent_for_newline, insert_text, max_line_display_width,
-    move_cursor, select_word_at, selected_text, set_cursor, word_bounds,
+    EditorView, HScrollBar, Movement, Position, Range, Selection, clamp_horizontal_left,
+    delete_backward, delete_forward, hscroll_left_at, indent_for_newline, insert_text,
+    max_line_display_width, move_cursor, select_word_at, selected_text, set_cursor, word_bounds,
 };
 use crate::language::{
     CompletionItem, LspCmd, LspStatus, completion_prefix, filter_completions, strip_snippets,
@@ -889,14 +891,7 @@ pub fn overlay_submit(app: &mut App) {
         Overlay::GoToLine { input } => {
             if let Ok(line) = input.parse::<usize>() {
                 let Some(id) = app.active else { return };
-                if let (Some(doc), Some(view)) = (app.documents.get(&id), app.views.get_mut(&id)) {
-                    set_cursor(
-                        view,
-                        &doc.rope,
-                        Position::new(line.saturating_sub(1), 0),
-                        false,
-                    );
-                }
+                jump_to(app, id, Position::new(line.saturating_sub(1), 0));
             }
             app.overlay = Overlay::None;
         }
@@ -906,14 +901,7 @@ pub fn overlay_submit(app: &mut App) {
             if let Some(item) = results.get(selected).cloned() {
                 app.open_path(item.path);
                 let Some(id) = app.active else { return };
-                if let (Some(doc), Some(view)) = (app.documents.get(&id), app.views.get_mut(&id)) {
-                    set_cursor(
-                        view,
-                        &doc.rope,
-                        Position::new(item.line, item.column),
-                        false,
-                    );
-                }
+                jump_to(app, id, Position::new(item.line, item.column));
             }
             app.overlay = Overlay::None;
         }
@@ -921,9 +909,12 @@ pub fn overlay_submit(app: &mut App) {
             if let Some(item) = items.get(selected).cloned() {
                 app.open_path(item.path);
                 let Some(id) = app.active else { return };
-                if let (Some(doc), Some(view)) = (app.documents.get(&id), app.views.get_mut(&id)) {
-                    let pos = decode_diagnostic_pos(doc, item.position);
-                    set_cursor(view, &doc.rope, pos, false);
+                if let Some(pos) = app
+                    .documents
+                    .get(&id)
+                    .map(|doc| decode_diagnostic_pos(doc, item.position))
+                {
+                    jump_to(app, id, pos);
                 }
             }
             app.overlay = Overlay::None;
@@ -997,6 +988,25 @@ fn dismiss_soft_overlays(app: &mut App) {
     }
 }
 
+pub fn jump_to(app: &mut App, id: crate::editor::DocumentId, pos: Position) {
+    place_and_reveal(app, id, |view, rope| set_cursor(view, rope, pos, false));
+}
+
+fn place_and_reveal(
+    app: &mut App,
+    id: crate::editor::DocumentId,
+    place: impl FnOnce(&mut EditorView, &Rope),
+) {
+    let height = app.editor_area.3.saturating_sub(2).max(1) as usize;
+    let width = app.editor_area.2.saturating_sub(app.gutter_width) as usize;
+    let tab_width = app.config.tab_width;
+    if let (Some(doc), Some(view)) = (app.documents.get(&id), app.views.get_mut(&id)) {
+        place(view, &doc.rope);
+        view.ensure_visible(&doc.rope, height, width, tab_width);
+    }
+    reveal_cursor(app, id);
+}
+
 fn jump_search(app: &mut App) {
     let Overlay::SearchFile {
         matches, current, ..
@@ -1008,15 +1018,13 @@ fn jump_search(app: &mut App) {
         return;
     };
     let Some(id) = app.active else { return };
-    if let (Some(doc), Some(view)) = (app.documents.get(&id), app.views.get_mut(&id)) {
+    place_and_reveal(app, id, |view, _rope| {
         view.cursor = end;
         view.selection = Some(Selection {
             anchor: start,
             cursor: end,
         });
-        view.ensure_visible(&doc.rope, 20, 80, app.config.tab_width);
-    }
-    reveal_cursor(app, id);
+    });
 }
 
 pub fn explorer_activate(app: &mut App) {

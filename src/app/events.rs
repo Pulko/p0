@@ -83,9 +83,12 @@ pub fn handle_lsp(app: &mut App, event: LspEvent) {
                 let item = items[0].clone();
                 app.open_path(item.path);
                 let Some(id) = app.active else { return };
-                if let (Some(doc), Some(view)) = (app.documents.get(&id), app.views.get_mut(&id)) {
-                    let pos = crate::app::state::decode_diagnostic_pos(doc, item.position);
-                    crate::editor::set_cursor(view, &doc.rope, pos, false);
+                if let Some(pos) = app
+                    .documents
+                    .get(&id)
+                    .map(|doc| crate::app::state::decode_diagnostic_pos(doc, item.position))
+                {
+                    commands::jump_to(app, id, pos);
                 }
             } else if !items.is_empty() {
                 app.overlay = Overlay::References { items, selected: 0 };
