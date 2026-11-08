@@ -19,6 +19,10 @@ pub enum LanguageId {
     Tsx,
     JavaScript,
     Json,
+    Yaml,
+    Toml,
+    Html,
+    Css,
     PlainText,
 }
 
@@ -34,7 +38,11 @@ impl LanguageId {
             "ts" => Self::TypeScript,
             "tsx" => Self::Tsx,
             "js" | "mjs" | "cjs" | "jsx" => Self::JavaScript,
-            "json" => Self::Json,
+            "json" | "jsonc" => Self::Json,
+            "yaml" | "yml" => Self::Yaml,
+            "toml" => Self::Toml,
+            "html" | "htm" => Self::Html,
+            "css" => Self::Css,
             _ => Self::PlainText,
         }
     }
@@ -45,6 +53,10 @@ impl LanguageId {
             Self::Tsx => "TSX",
             Self::JavaScript => "JavaScript",
             Self::Json => "JSON",
+            Self::Yaml => "YAML",
+            Self::Toml => "TOML",
+            Self::Html => "HTML",
+            Self::Css => "CSS",
             Self::PlainText => "Plain Text",
         }
     }
@@ -55,6 +67,10 @@ impl LanguageId {
             Self::Tsx => "typescriptreact",
             Self::JavaScript => "javascript",
             Self::Json => "json",
+            Self::Yaml => "yaml",
+            Self::Toml => "toml",
+            Self::Html => "html",
+            Self::Css => "css",
             Self::PlainText => "plaintext",
         }
     }

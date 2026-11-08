@@ -62,4 +62,4 @@ npm install -g typescript typescript-language-server
 ## Limits
 
 - Git marks need a worktree.
-- Intelligence covers TypeScript and JavaScript. Other files still edit and save.
+- JSON, YAML, HTML, and CSS are colored. Types and completion stay TypeScript and JavaScript. Other files still edit and save.
