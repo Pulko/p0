@@ -1,6 +1,6 @@
 [package]
 name = "p0-ide"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "A mouse-driven terminal IDE for TypeScript and JavaScript on macOS."
