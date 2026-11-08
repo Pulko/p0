@@ -98,9 +98,6 @@ pub enum Overlay {
         matches: Vec<(Position, Position)>,
         current: usize,
     },
-    GoToLine {
-        input: String,
-    },
     Completion {
         items: Vec<CompletionItem>,
         selected: usize,

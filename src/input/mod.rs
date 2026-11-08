@@ -49,13 +49,6 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 return;
             }
             KeyCode::Char('f') | KeyCode::Char('F') => return commands::open_search_file(app),
-            KeyCode::Char('g') | KeyCode::Char('G') => {
-                app.overlay = Overlay::GoToLine {
-                    input: String::new(),
-                };
-                return;
-            }
-            KeyCode::Char(' ') => return app.request_completion(),
             KeyCode::Char('z') | KeyCode::Char('Z') => return commands::undo(app),
             KeyCode::Char('y') | KeyCode::Char('Y') => return commands::redo(app),
             KeyCode::Char('b') | KeyCode::Char('B') => {
@@ -72,9 +65,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 return commands::open_help(app);
             }
             KeyCode::Enter => return commands::go_to_definition(app),
-            KeyCode::Char('r') | KeyCode::Char('R') if shift => {
-                return commands::find_references(app);
-            }
+            KeyCode::Char('r') | KeyCode::Char('R') if shift => return,
             KeyCode::Char('r') | KeyCode::Char('R') => return commands::start_rename_symbol(app),
             _ => {}
         }

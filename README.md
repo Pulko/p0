@@ -20,10 +20,7 @@ Click to place the cursor. Type to insert. There are no modes.
 | Save | Ctrl+S |
 | Find | Ctrl+P |
 | Search in file | Ctrl+F |
-| Go to line | Ctrl+G |
-| Completion | Ctrl+Space |
 | Go to definition | Ctrl+Enter or Ctrl+Click |
-| Find references | Ctrl+Shift+R |
 | Rename symbol | Ctrl+R |
 | Undo / redo | Ctrl+Z / Ctrl+Y |
 | Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab |

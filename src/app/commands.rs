@@ -731,11 +731,6 @@ pub fn overlay_char(app: &mut App, ch: char) {
         | Overlay::Prompt { input: query, .. } => {
             query.push(ch);
         }
-        Overlay::GoToLine { input } => {
-            if ch.is_ascii_digit() {
-                input.push(ch);
-            }
-        }
         _ => {}
     }
     refresh_overlay_query(app);
@@ -745,7 +740,6 @@ fn overlay_backspace(app: &mut App) -> bool {
     let handled = match &mut app.overlay {
         Overlay::Search { query, .. }
         | Overlay::SearchFile { query, .. }
-        | Overlay::GoToLine { input: query }
         | Overlay::Prompt { input: query, .. } => {
             query.pop();
             true
@@ -907,13 +901,6 @@ pub fn overlay_submit(app: &mut App) {
                 if let Some(id) = app.active {
                     jump_to(app, id, Position::new(item.line, item.column));
                 }
-            }
-            app.overlay = Overlay::None;
-        }
-        Overlay::GoToLine { input } => {
-            if let Ok(line) = input.parse::<usize>() {
-                let Some(id) = app.active else { return };
-                jump_to(app, id, Position::new(line.saturating_sub(1), 0));
             }
             app.overlay = Overlay::None;
         }

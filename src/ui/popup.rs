@@ -95,16 +95,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 area,
             );
         }
-        Overlay::GoToLine { input } => {
-            let area = top_box(frame.area(), 3, 24);
-            frame.render_widget(Clear, area);
-            frame.render_widget(
-                Paragraph::new(format!(" {input} "))
-                    .style(theme.text())
-                    .block(theme.panel(" Go to line ")),
-                area,
-            );
-        }
         Overlay::Completion { .. } => {}
         Overlay::Hover {
             title, text, x, y, ..
@@ -305,10 +295,7 @@ pub(crate) fn shortcut_rows() -> Vec<(&'static str, &'static str)> {
         ("Ctrl+P", "Find"),
         ("Click Search", "Search text in the repo"),
         ("Ctrl+F", "Search in file"),
-        ("Ctrl+G", "Go to line"),
-        ("Ctrl+Space", "Completion"),
         ("Ctrl+Enter", "Go to definition"),
-        ("Ctrl+Shift+R", "Find references"),
         ("Ctrl+R", "Rename symbol"),
         ("Ctrl+Z / Y", "Undo / redo"),
         ("Ctrl+Tab", "Next / previous tab"),
@@ -318,7 +305,6 @@ pub(crate) fn shortcut_rows() -> Vec<(&'static str, &'static str)> {
         ("Ctrl+N", "New file"),
         ("Ctrl+Q", "Quit"),
         ("Esc", "Close a popup"),
-        ("Click theme", "Choose a color scheme"),
     ]
 }
 
