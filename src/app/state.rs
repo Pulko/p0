@@ -235,7 +235,7 @@ pub struct App {
     pub menu_rows: Vec<(usize, u16)>,
     pub inline_changes: HashMap<DocumentId, LineChanges>,
     pub diff_baselines: HashMap<DocumentId, DiffBaseline>,
-    pub folded_hunks: HashSet<(DocumentId, usize)>,
+    pub open_hunks: HashSet<(DocumentId, usize)>,
 }
 
 impl App {
@@ -295,7 +295,7 @@ impl App {
             menu_rows: Vec::new(),
             inline_changes: HashMap::new(),
             diff_baselines: HashMap::new(),
-            folded_hunks: HashSet::new(),
+            open_hunks: HashSet::new(),
             documents: HashMap::new(),
             views: HashMap::new(),
             order: Vec::new(),
@@ -493,7 +493,7 @@ impl App {
         self.order.retain(|x| *x != id);
         self.inline_changes.remove(&id);
         self.diff_baselines.remove(&id);
-        self.folded_hunks.retain(|(doc_id, _)| *doc_id != id);
+        self.open_hunks.retain(|(doc_id, _)| *doc_id != id);
         self.active = self.order.last().copied();
         if self
             .diff_view
@@ -595,7 +595,7 @@ impl App {
             .into_iter()
             .map(|hunk| hunk.start)
             .collect();
-        self.folded_hunks
+        self.open_hunks
             .retain(|(id, start)| *id != document_id || valid_starts.contains(start));
         self.inline_changes.insert(document_id, changes);
     }
@@ -610,7 +610,7 @@ impl App {
             None => {
                 self.diff_baselines.remove(&document_id);
                 self.inline_changes.remove(&document_id);
-                self.folded_hunks.retain(|(id, _)| *id != document_id);
+                self.open_hunks.retain(|(id, _)| *id != document_id);
             }
         }
         let refreshed = self.diff_baselines.get(&document_id).and_then(|baseline| {
@@ -647,7 +647,7 @@ impl App {
             .map(crate::workspace::change_hunks)
             .unwrap_or_default();
         let folded: Vec<usize> = self
-            .folded_hunks
+            .open_hunks
             .iter()
             .filter(|(id, _)| *id == document_id)
             .map(|(_, start)| *start)
@@ -668,19 +668,8 @@ impl App {
             return;
         };
         let key = (document_id, hunk.start);
-        if !self.folded_hunks.insert(key) {
-            self.folded_hunks.remove(&key);
-        }
-    }
-
-    pub fn unfold_at_cursor(&mut self, document_id: DocumentId, line: usize) {
-        let Some(changes) = self.inline_changes.get(&document_id).cloned() else {
-            return;
-        };
-        for hunk in crate::workspace::change_hunks(&changes) {
-            if line >= hunk.start && line < hunk.end {
-                self.folded_hunks.remove(&(document_id, hunk.start));
-            }
+        if !self.open_hunks.insert(key) {
+            self.open_hunks.remove(&key);
         }
     }
 

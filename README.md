@@ -38,7 +38,7 @@ Click to place the cursor. Type to insert. There are no modes.
 
 Click **Help** in the status bar for the same list. Click the theme name there to choose `p0`, `light`, `contrast`, `ocean`, or `ember`.
 
-Right-click a symbol for its type, Go to Definition, and Find References. Click a gutter mark to fold that change. A red underline is an error and a yellow one is a warning; the status bar shows that message at the cursor, and pausing the mouse shows the full text.
+Right-click a symbol for its type, Go to Definition, and Find References. Click a gutter mark to show the previous lines, and click again to hide them. A red underline is an error and a yellow one is a warning; the status bar shows that message at the cursor, and pausing the mouse shows the full text.
 
 ## Config
 

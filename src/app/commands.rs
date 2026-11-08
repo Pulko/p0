@@ -1198,8 +1198,19 @@ pub fn handle_watch(app: &mut App, event: WatchEvent) {
 
 pub fn click_editor(app: &mut App, x: u16, y: u16, selecting: bool) {
     let Some(id) = app.active else { return };
-    if gutter_or_fold_click(app, x, y) {
-        app.toggle_hunk_at_line(id, visual_target_line(app, x, y).unwrap_or(0));
+    let removed = removed_row_click(app, x, y);
+    if removed {
+        if !selecting {
+            if let Some(line) = visual_target_line(app, x, y) {
+                app.toggle_hunk_at_line(id, line);
+            }
+        }
+        return;
+    }
+    if !selecting && gutter_click(app, x, y) {
+        if let Some(line) = visual_target_line(app, x, y) {
+            app.toggle_hunk_at_line(id, line);
+        }
         return;
     }
     let Some(pos) = editor_position_at(app, x, y) else {
@@ -1218,8 +1229,14 @@ pub fn click_editor(app: &mut App, x: u16, y: u16, selecting: bool) {
     reveal_cursor(app, id);
 }
 
-fn gutter_or_fold_click(app: &App, x: u16, y: u16) -> bool {
-    let Some(id) = app.active else { return false };
+fn removed_row_click(app: &App, x: u16, y: u16) -> bool {
+    let Some(row) = visual_row_at(app, x, y) else {
+        return false;
+    };
+    matches!(row, crate::workspace::VisualRow::Removed { .. })
+}
+
+fn gutter_click(app: &App, x: u16, y: u16) -> bool {
     let (ex, ey, _ew, eh) = app.editor_area;
     if y <= ey || x <= ex {
         return false;
@@ -1229,18 +1246,21 @@ fn gutter_or_fold_click(app: &App, x: u16, y: u16) -> bool {
     if rel_y >= eh.saturating_sub(2) {
         return false;
     }
-    let rows = app.visual_rows(id);
-    let visual = app
-        .views
-        .get(&id)
-        .map(|view| view.viewport.top)
-        .unwrap_or(0)
-        + rel_y as usize;
-    let folded = matches!(
-        rows.get(visual),
-        Some(crate::workspace::VisualRow::Fold { .. })
-    );
-    folded || rel_x + 1 == app.gutter_width
+    rel_x + 1 == app.gutter_width
+}
+
+fn visual_row_at(app: &App, x: u16, y: u16) -> Option<crate::workspace::VisualRow> {
+    let id = app.active?;
+    let (ex, ey, _ew, eh) = app.editor_area;
+    if y <= ey || x <= ex {
+        return None;
+    }
+    let rel_y = y.saturating_sub(ey).saturating_sub(1);
+    if rel_y >= eh.saturating_sub(2) {
+        return None;
+    }
+    let visual = app.views.get(&id)?.viewport.top + rel_y as usize;
+    app.visual_rows(id).get(visual).cloned()
 }
 
 fn visual_target_line(app: &App, _x: u16, y: u16) -> Option<usize> {
@@ -1268,8 +1288,8 @@ pub fn editor_position_at(app: &App, x: u16, y: u16) -> Option<Position> {
         return None;
     }
     let visual = view.viewport.top + rel_y as usize;
-    let line = match app.visual_rows(id).get(visual).copied() {
-        Some(crate::workspace::VisualRow::Line(line)) => line,
+    let line = match app.visual_rows(id).get(visual) {
+        Some(crate::workspace::VisualRow::Line(line)) => *line,
         _ => return None,
     };
     if line >= doc.rope.len_lines() {
@@ -1295,7 +1315,6 @@ pub fn double_click_editor(app: &mut App, x: u16, y: u16) {
 
 pub fn reveal_cursor(app: &mut App, id: crate::editor::DocumentId) {
     let line = app.views.get(&id).map(|view| view.cursor.line).unwrap_or(0);
-    app.unfold_at_cursor(id, line);
     let rows = app.visual_rows(id);
     let index = crate::workspace::visual_index_for_line(&rows, line).unwrap_or(0);
     let height = app.editor_area.3.saturating_sub(2).max(1) as usize;

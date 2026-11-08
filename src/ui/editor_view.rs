@@ -54,7 +54,7 @@ pub fn render(frame: &mut Frame, tabs: Rect, area: Rect, app: &mut App) {
         .take(inner_h)
         .filter_map(|row| match row {
             VisualRow::Line(line) => Some(*line),
-            VisualRow::Fold { .. } => None,
+            VisualRow::Removed { .. } => None,
         })
         .collect();
     let highlight_start = visible_lines.first().copied().unwrap_or(0);
@@ -80,24 +80,19 @@ pub fn render(frame: &mut Frame, tabs: Rect, area: Rect, app: &mut App) {
 
     let mut lines = Vec::new();
     for row in 0..inner_h.max(1) {
-        let Some(visual) = rows.get(view.viewport.top + row).copied() else {
+        let Some(visual) = rows.get(view.viewport.top + row).cloned() else {
             lines.push(Line::from(""));
             continue;
         };
-        if let VisualRow::Fold {
-            end,
-            start,
-            deleted,
-        } = visual
-        {
-            let count = end.saturating_sub(start) + deleted;
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "▸ {count} changed line{}",
-                    if count == 1 { "" } else { "s" }
-                ),
-                Style::default().fg(theme.accent),
-            )));
+        if let VisualRow::Removed { text, .. } = &visual {
+            lines.push(removed_line(
+                text,
+                view.viewport.left,
+                inner_w,
+                number_width,
+                tab_width,
+                theme,
+            ));
             continue;
         }
         let VisualRow::Line(line_idx) = visual else {
@@ -216,6 +211,58 @@ fn paint_hscroll(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme, inn
             height: 1,
         },
     );
+}
+
+fn removed_line(
+    text: &str,
+    left: usize,
+    width: usize,
+    number_width: u16,
+    tab_width: usize,
+    theme: Theme,
+) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(" ".repeat(number_width as usize), Style::default()),
+        Span::styled("-", Style::default().fg(theme.on_accent).bg(theme.deleted)),
+        Span::styled(
+            scrolled_plain(text, left, width, tab_width),
+            Style::default().fg(theme.deleted),
+        ),
+    ])
+}
+
+fn scrolled_plain(text: &str, left: usize, width: usize, tab_width: usize) -> String {
+    let mut display = 0usize;
+    let mut visible = 0usize;
+    let mut out = String::new();
+    for g in text.graphemes(true) {
+        let w = if g == "\t" {
+            tab_width - (display % tab_width.max(1))
+        } else {
+            UnicodeWidthStr::width(g).max(1)
+        };
+        let start = display;
+        display += w;
+        if display <= left {
+            continue;
+        }
+        if start >= left + width || visible >= width {
+            break;
+        }
+        if g == "\t" {
+            let skip = left.saturating_sub(start);
+            let take = w.saturating_sub(skip).min(width - visible);
+            out.push_str(&" ".repeat(take));
+            visible += take;
+        } else {
+            out.push_str(g);
+            visible += w;
+        }
+    }
+    if out.is_empty() {
+        out.push(' ');
+    }
+    out
 }
 
 fn gutter_span(changes: &LineChanges, line_idx: usize, theme: Theme) -> Span<'static> {

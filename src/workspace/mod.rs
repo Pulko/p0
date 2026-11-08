@@ -69,23 +69,20 @@ pub enum LineMark {
 pub struct LineChanges {
     pub marks: Vec<LineMark>,
     pub deleted_before: Vec<usize>,
+    pub removed_before: Vec<Vec<String>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hunk {
     pub start: usize,
     pub end: usize,
-    pub deleted: usize,
+    pub removed: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VisualRow {
     Line(usize),
-    Fold {
-        start: usize,
-        end: usize,
-        deleted: usize,
-    },
+    Removed { text: String, anchor: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -498,34 +495,49 @@ pub fn classify_lines(original: &str, current: &str) -> LineChanges {
     let diff = TextDiff::from_slices(&old_lines, &new_lines);
     let mut marks = vec![LineMark::Unchanged; new_lines.len()];
     let mut deleted_before = vec![0; new_lines.len() + 1];
+    let mut removed_before = vec![Vec::new(); new_lines.len() + 1];
     let mut index = 0;
     let mut pending_deletes = 0usize;
+    let mut pending_text: Vec<String> = Vec::new();
     for change in diff.iter_all_changes() {
         match change.tag() {
             ChangeTag::Equal => {
+                removed_before[index].append(&mut pending_text);
                 deleted_before[index] += pending_deletes;
                 pending_deletes = 0;
                 index += 1;
             }
-            ChangeTag::Delete => pending_deletes += 1,
+            ChangeTag::Delete => {
+                pending_text.push(diff_line_text(change.value()));
+                pending_deletes += 1;
+            }
             ChangeTag::Insert => {
-                marks[index] = if pending_deletes > 0 {
+                if pending_deletes > 0 {
                     pending_deletes -= 1;
-                    LineMark::Modified
+                    if !pending_text.is_empty() {
+                        removed_before[index].push(pending_text.remove(0));
+                    }
+                    marks[index] = LineMark::Modified;
                 } else {
-                    LineMark::Added
-                };
+                    marks[index] = LineMark::Added;
+                }
                 index += 1;
             }
         }
     }
     if index < deleted_before.len() {
+        removed_before[index].append(&mut pending_text);
         deleted_before[index] += pending_deletes;
     }
     LineChanges {
         marks,
         deleted_before,
+        removed_before,
     }
+}
+
+fn diff_line_text(value: &str) -> String {
+    value.trim_end_matches(['\n', '\r']).to_string()
 }
 
 pub fn change_hunks(changes: &LineChanges) -> Vec<Hunk> {
@@ -536,90 +548,91 @@ pub fn change_hunks(changes: &LineChanges) -> Vec<Hunk> {
             hunks.push(Hunk {
                 start: index,
                 end: index,
-                deleted: changes.deleted_before[index],
+                removed: removed_at(changes, index),
             });
             index += 1;
             continue;
         }
         if changes.marks[index] != LineMark::Unchanged {
             let start = index;
-            let mut deleted = changes.deleted_before[index];
+            let mut removed = removed_at(changes, index);
             index += 1;
             while index < changes.marks.len() && changes.marks[index] != LineMark::Unchanged {
-                deleted += changes.deleted_before[index];
+                removed.extend(removed_at(changes, index));
                 index += 1;
             }
             hunks.push(Hunk {
                 start,
                 end: index,
-                deleted,
+                removed,
             });
             continue;
         }
         index += 1;
     }
-    if let Some(deleted) = changes.deleted_before.last().copied() {
-        if deleted > 0 {
-            hunks.push(Hunk {
-                start: changes.marks.len(),
-                end: changes.marks.len(),
-                deleted,
-            });
-        }
+    if changes
+        .deleted_before
+        .last()
+        .copied()
+        .is_some_and(|deleted| deleted > 0)
+    {
+        let start = changes.marks.len();
+        hunks.push(Hunk {
+            start,
+            end: start,
+            removed: removed_at(changes, start),
+        });
     }
     hunks
 }
 
-pub fn visual_rows(line_count: usize, hunks: &[Hunk], folded: &[usize]) -> Vec<VisualRow> {
+fn removed_at(changes: &LineChanges, index: usize) -> Vec<String> {
+    changes
+        .removed_before
+        .get(index)
+        .cloned()
+        .unwrap_or_default()
+}
+
+pub fn visual_rows(line_count: usize, hunks: &[Hunk], open: &[usize]) -> Vec<VisualRow> {
     let mut rows = Vec::new();
     let mut index = 0;
     while index < line_count {
         if let Some(hunk) = hunks
             .iter()
-            .find(|hunk| hunk.start == index && folded.contains(&hunk.start))
+            .find(|hunk| hunk.start == index && open.contains(&hunk.start))
         {
-            rows.push(VisualRow::Fold {
-                start: hunk.start,
-                end: hunk.end,
-                deleted: hunk.deleted,
-            });
-            if hunk.end == hunk.start {
-                rows.push(VisualRow::Line(index));
-                index += 1;
-            } else {
-                index = hunk.end;
-            }
-            continue;
+            push_removed(&mut rows, hunk);
         }
         rows.push(VisualRow::Line(index));
         index += 1;
     }
-    if line_count == 0
-        && hunks
-            .first()
-            .is_some_and(|hunk| hunk.start == 0 && folded.contains(&0))
-    {
-        let hunk = hunks[0];
-        rows.push(VisualRow::Fold {
-            start: hunk.start,
-            end: hunk.end,
-            deleted: hunk.deleted,
-        });
+    if let Some(hunk) = hunks.iter().find(|hunk| {
+        hunk.start == line_count && hunk.end == line_count && open.contains(&hunk.start)
+    }) {
+        push_removed(&mut rows, hunk);
     }
     rows
 }
 
+fn push_removed(rows: &mut Vec<VisualRow>, hunk: &Hunk) {
+    for line in &hunk.removed {
+        rows.push(VisualRow::Removed {
+            text: line.clone(),
+            anchor: hunk.start,
+        });
+    }
+}
+
 pub fn visual_index_for_line(rows: &[VisualRow], line: usize) -> Option<usize> {
-    rows.iter().position(|row| match row {
-        VisualRow::Line(index) => *index == line,
-        VisualRow::Fold { start, end, .. } => line >= *start && line < *end,
-    })
+    rows.iter()
+        .position(|row| matches!(row, VisualRow::Line(index) if *index == line))
 }
 
 pub fn buffer_line_at(rows: &[VisualRow], visual_index: usize) -> Option<usize> {
     match rows.get(visual_index)? {
         VisualRow::Line(line) => Some(*line),
-        VisualRow::Fold { start, .. } => Some(*start),
+        VisualRow::Removed { anchor, .. } => Some(*anchor),
     }
 }
 
@@ -797,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn classifies_and_folds_changed_lines() {
+    fn classifies_and_shows_removed_lines() {
         let changes = classify_lines("alpha\nbeta\ngamma\n", "alpha\nBETA\nextra\ngamma\n");
         assert_eq!(changes.marks[1], LineMark::Modified);
         assert_eq!(changes.marks[2], LineMark::Added);
@@ -805,18 +818,24 @@ mod tests {
         assert_eq!(hunks.len(), 1);
         assert_eq!(hunks[0].start, 1);
         assert_eq!(hunks[0].end, 3);
-        let folded = visual_rows(changes.marks.len(), &hunks, &[1]);
-        assert!(matches!(
-            folded[1],
-            VisualRow::Fold {
-                start: 1,
-                end: 3,
-                ..
+        assert_eq!(hunks[0].removed, vec!["beta".to_string()]);
+        let closed = visual_rows(changes.marks.len(), &hunks, &[]);
+        assert!(closed.iter().all(|row| matches!(row, VisualRow::Line(_))));
+        let open = visual_rows(changes.marks.len(), &hunks, &[1]);
+        assert_eq!(open[0], VisualRow::Line(0));
+        assert_eq!(
+            open[1],
+            VisualRow::Removed {
+                text: "beta".into(),
+                anchor: 1,
             }
-        ));
-        assert_eq!(buffer_line_at(&folded, 0), Some(0));
-        assert_eq!(buffer_line_at(&folded, 2), Some(3));
-        assert_eq!(visual_index_for_line(&folded, 3), Some(2));
+        );
+        assert_eq!(open[2], VisualRow::Line(1));
+        assert_eq!(open[3], VisualRow::Line(2));
+        assert_eq!(buffer_line_at(&open, 0), Some(0));
+        assert_eq!(buffer_line_at(&open, 1), Some(1));
+        assert_eq!(buffer_line_at(&open, 4), Some(3));
+        assert_eq!(visual_index_for_line(&open, 3), Some(4));
     }
 
     #[test]
