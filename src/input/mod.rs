@@ -164,6 +164,24 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn scroll_tabs(app: &mut App, x: u16) -> bool {
+    if let Some((hit_x, width)) = app.tab_scroll_left
+        && x >= hit_x
+        && x < hit_x.saturating_add(width)
+    {
+        app.tab_scroll = app.tab_scroll.saturating_sub(1);
+        return true;
+    }
+    if let Some((hit_x, width)) = app.tab_scroll_right
+        && x >= hit_x
+        && x < hit_x.saturating_add(width)
+    {
+        app.tab_scroll = app.tab_scroll.saturating_add(1);
+        return true;
+    }
+    false
+}
+
 fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     let x = mouse.column;
     let y = mouse.row;
@@ -243,7 +261,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                     crate::app::state::StatusAction::Theme => commands::open_themes(app),
                     crate::app::state::StatusAction::Help => commands::open_help(app),
                 }
-            } else if in_tabs {
+            } else if in_tabs && !scroll_tabs(app, x) {
                 if let Some(tab) = app
                     .tab_hit_boxes
                     .iter()

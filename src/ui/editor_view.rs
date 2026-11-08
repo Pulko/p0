@@ -329,44 +329,237 @@ fn render_diff(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     );
 }
 
+const TAB_CHEVRON: u16 = 2;
+
+struct TabPlacement {
+    index: usize,
+    x: u16,
+    width: u16,
+    label: String,
+}
+
+struct TabStrip {
+    scroll: usize,
+    left: Option<u16>,
+    right: Option<u16>,
+    tabs: Vec<TabPlacement>,
+}
+
 fn render_tabs(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
-    let mut spans = Vec::new();
     app.tab_hit_boxes.clear();
-    let mut x = area.x;
-    let right = area.right();
-    for id in &app.order {
-        let Some(doc) = app.documents.get(id) else {
-            continue;
-        };
-        let name = doc
-            .path
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "untitled".into());
-        let dirty = if doc.is_dirty() { " •" } else { "" };
-        let label = format!(" {name}{dirty} ×");
-        let width = label.chars().count() as u16;
-        let Some(hit_box) = tab_hit_box(*id, x, width, right) else {
-            if x < right {
-                spans.push(Span::styled("»", Style::default().fg(theme.fg_dim)));
-            }
-            break;
-        };
+    app.tab_scroll_left = None;
+    app.tab_scroll_right = None;
+    let opened: Vec<(crate::editor::DocumentId, String)> = app
+        .order
+        .iter()
+        .filter_map(|id| {
+            let doc = app.documents.get(id)?;
+            Some((*id, tab_label(doc)))
+        })
+        .collect();
+    let labels: Vec<String> = opened.iter().map(|(_, label)| label.clone()).collect();
+    let active_index = app
+        .active
+        .and_then(|id| opened.iter().position(|(tab_id, _)| *tab_id == id));
+    let reveal = app.tab_revealed != app.active;
+    let strip = layout_tab_strip(&labels, app.tab_scroll, area.width, active_index, reveal);
+    app.tab_scroll = strip.scroll;
+    app.tab_revealed = app.active;
+
+    let mut spans = Vec::new();
+    let mut cursor = 0u16;
+    if let Some(x) = strip.left {
+        push_gap(&mut spans, &mut cursor, x);
+        spans.push(Span::styled("<<", Style::default().fg(theme.fg_dim)));
+        cursor = cursor.saturating_add(TAB_CHEVRON);
+        app.tab_scroll_left = Some((area.x.saturating_add(x), TAB_CHEVRON));
+    }
+    for placed in &strip.tabs {
+        push_gap(&mut spans, &mut cursor, placed.x);
+        let id = opened[placed.index].0;
         let mut style = Style::default().fg(theme.fg_muted);
-        if Some(*id) == app.active {
+        if app.active == Some(id) {
             style = Style::default()
                 .fg(theme.fg)
-                .bg(theme.bg_current)
+                .bg(theme.bg_selected)
                 .add_modifier(Modifier::BOLD);
         }
-        spans.push(Span::styled(label, style));
-        app.tab_hit_boxes.push(hit_box);
-        x = x.saturating_add(width);
-        spans.push(Span::raw(" "));
-        x = x.saturating_add(1);
+        spans.push(Span::styled(placed.label.clone(), style));
+        if let Some(hit_box) = tab_hit_box(
+            id,
+            area.x.saturating_add(placed.x),
+            placed.width,
+            area.right(),
+        ) {
+            app.tab_hit_boxes.push(hit_box);
+        }
+        cursor = cursor.saturating_add(placed.width);
+    }
+    if let Some(x) = strip.right {
+        push_gap(&mut spans, &mut cursor, x);
+        spans.push(Span::styled(">>", Style::default().fg(theme.fg_dim)));
+        app.tab_scroll_right = Some((area.x.saturating_add(x), TAB_CHEVRON));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)).style(theme.text()), area);
+}
+
+fn tab_label(doc: &crate::editor::Document) -> String {
+    let name = doc
+        .path
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "untitled".into());
+    let dirty = if doc.is_dirty() { " •" } else { "" };
+    format!(" {name}{dirty} ×")
+}
+
+fn layout_tab_strip(
+    labels: &[String],
+    mut scroll: usize,
+    width: u16,
+    active: Option<usize>,
+    reveal: bool,
+) -> TabStrip {
+    if labels.is_empty() || width == 0 {
+        return TabStrip {
+            scroll: 0,
+            left: None,
+            right: None,
+            tabs: Vec::new(),
+        };
+    }
+    scroll = scroll.min(labels.len() - 1);
+    if reveal {
+        if let Some(active) = active.filter(|index| *index < labels.len()) {
+            if active < scroll {
+                scroll = active;
+            }
+            while scroll < active && !tab_is_visible(labels, scroll, width, active) {
+                scroll += 1;
+            }
+        }
+    }
+    place_tabs(labels, scroll, width)
+}
+
+fn tab_is_visible(labels: &[String], scroll: usize, width: u16, active: usize) -> bool {
+    place_tabs(labels, scroll, width)
+        .tabs
+        .iter()
+        .any(|tab| tab.index == active)
+}
+
+fn place_tabs(labels: &[String], scroll: usize, width: u16) -> TabStrip {
+    if labels.is_empty() || width == 0 {
+        return TabStrip {
+            scroll: 0,
+            left: None,
+            right: None,
+            tabs: Vec::new(),
+        };
+    }
+    let scroll = scroll.min(labels.len() - 1);
+    let show_left = scroll > 0 && width >= TAB_CHEVRON;
+    let left_w = if show_left { TAB_CHEVRON } else { 0 };
+    let mut tabs = Vec::new();
+    let mut x = left_w;
+    let mut end = scroll;
+    while end < labels.len() {
+        let more_after = end + 1 < labels.len();
+        let reserve = if more_after && width >= left_w.saturating_add(TAB_CHEVRON) {
+            TAB_CHEVRON
+        } else {
+            0
+        };
+        let gap = if tabs.is_empty() { 0 } else { 1 };
+        let room = width
+            .saturating_sub(x)
+            .saturating_sub(gap)
+            .saturating_sub(reserve);
+        if room == 0 {
+            break;
+        }
+        let natural = display_width(&labels[end]) as u16;
+        if natural > room && !tabs.is_empty() {
+            break;
+        }
+        let label = fit_tab_label(&labels[end], room as usize);
+        let tab_w = display_width(&label) as u16;
+        if tab_w == 0 || tab_w > room {
+            break;
+        }
+        x = x.saturating_add(gap);
+        tabs.push(TabPlacement {
+            index: end,
+            x,
+            width: tab_w,
+            label,
+        });
+        x = x.saturating_add(tab_w);
+        end += 1;
+        if natural > room {
+            break;
+        }
+    }
+    let show_right = end < labels.len() && width >= left_w.saturating_add(TAB_CHEVRON);
+    TabStrip {
+        scroll,
+        left: show_left.then_some(0),
+        right: show_right.then_some(width - TAB_CHEVRON),
+        tabs,
+    }
+}
+
+fn fit_tab_label(label: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if display_width(label) <= max_width {
+        return label.to_string();
+    }
+    let Some(stem) = label.strip_suffix(" ×") else {
+        return truncate_width(label, max_width);
+    };
+    let close_w = display_width(" ×");
+    if max_width <= close_w {
+        return truncate_width(" ×", max_width);
+    }
+    let ellipsis = "…";
+    let ellipsis_w = display_width(ellipsis);
+    let stem_budget = max_width - close_w;
+    if stem_budget <= ellipsis_w {
+        return format!("{} ×", truncate_width(stem, stem_budget));
+    }
+    format!(
+        "{}{ellipsis} ×",
+        truncate_width(stem, stem_budget - ellipsis_w)
+    )
+}
+
+fn push_gap(spans: &mut Vec<Span<'static>>, cursor: &mut u16, target: u16) {
+    if target > *cursor {
+        spans.push(Span::raw(" ".repeat((target - *cursor) as usize)));
+        *cursor = target;
+    }
+}
+
+fn display_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+fn truncate_width(text: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    let mut width = 0;
+    for grapheme in text.graphemes(true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if width + grapheme_width > max_width {
+            break;
+        }
+        out.push_str(grapheme);
+        width += grapheme_width;
+    }
+    out
 }
 
 fn tab_hit_box(
@@ -532,5 +725,110 @@ mod tests {
         assert!(15 >= hit.x && 15 < hit.x + hit.width);
         assert_ne!(15, hit.close_x);
         assert!(tab_hit_box(DocumentId(8), 22, 12, 30).is_none());
+    }
+
+    fn sample_labels(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| format!(" {name} ×")).collect()
+    }
+
+    fn assert_strip_inside(strip: &TabStrip, width: u16) {
+        if let Some(x) = strip.left {
+            assert!(x + TAB_CHEVRON <= width);
+        }
+        if let Some(x) = strip.right {
+            assert!(x + TAB_CHEVRON <= width);
+            for tab in &strip.tabs {
+                assert!(tab.x + tab.width <= x);
+            }
+        }
+        for tab in &strip.tabs {
+            assert!(tab.x + tab.width <= width);
+            assert_eq!(UnicodeWidthStr::width(tab.label.as_str()) as u16, tab.width);
+            if strip.left.is_some() {
+                assert!(tab.x >= TAB_CHEVRON);
+            }
+        }
+    }
+
+    #[test]
+    fn tab_strip_hides_chevrons_when_everything_fits() {
+        let strip = layout_tab_strip(&sample_labels(&["a", "b", "c"]), 0, 40, None, false);
+        assert!(strip.left.is_none());
+        assert!(strip.right.is_none());
+        assert_eq!(strip.tabs.len(), 3);
+        assert_strip_inside(&strip, 40);
+    }
+
+    #[test]
+    fn tab_strip_shows_the_right_chevron_on_the_first_page() {
+        let strip = layout_tab_strip(
+            &sample_labels(&["abcd", "abcd", "abcd"]),
+            0,
+            12,
+            None,
+            false,
+        );
+        assert!(strip.left.is_none());
+        assert!(strip.right.is_some());
+        assert!(strip.tabs.len() < 3);
+        assert_strip_inside(&strip, 12);
+    }
+
+    #[test]
+    fn tab_strip_shows_both_chevrons_after_scrolling() {
+        let strip = layout_tab_strip(
+            &sample_labels(&["abcd", "abcd", "abcd"]),
+            1,
+            12,
+            None,
+            false,
+        );
+        assert!(strip.left.is_some());
+        assert!(strip.right.is_some());
+        assert_eq!(strip.scroll, 1);
+        assert_strip_inside(&strip, 12);
+    }
+
+    #[test]
+    fn tab_strip_shows_only_the_left_chevron_at_the_end() {
+        let strip = layout_tab_strip(
+            &sample_labels(&["abcd", "abcd", "abcd"]),
+            2,
+            12,
+            None,
+            false,
+        );
+        assert!(strip.left.is_some());
+        assert!(strip.right.is_none());
+        assert_eq!(strip.tabs.len(), 1);
+        assert_eq!(strip.tabs[0].index, 2);
+        assert_strip_inside(&strip, 12);
+    }
+
+    #[test]
+    fn tab_strip_truncates_a_tab_wider_than_the_strip() {
+        let strip = layout_tab_strip(
+            &sample_labels(&["abcdefghijklmnopqrstuvwxyz"]),
+            0,
+            10,
+            None,
+            false,
+        );
+        assert_eq!(strip.tabs.len(), 1);
+        assert!(strip.tabs[0].width <= 10);
+        assert!(strip.tabs[0].label.ends_with('×'));
+        assert!(strip.tabs[0].label.contains('…'));
+        assert_strip_inside(&strip, 10);
+    }
+
+    #[test]
+    fn changing_the_active_tab_reveals_it() {
+        let labels = sample_labels(&["abcd", "abcd", "abcd", "abcd", "abcd"]);
+        let hidden = layout_tab_strip(&labels, 0, 12, Some(4), false);
+        assert!(hidden.tabs.iter().all(|tab| tab.index != 4));
+        let revealed = layout_tab_strip(&labels, 0, 12, Some(4), true);
+        assert!(revealed.tabs.iter().any(|tab| tab.index == 4));
+        assert!(revealed.scroll > 0);
+        assert_strip_inside(&revealed, 12);
     }
 }
