@@ -21,7 +21,7 @@ pub fn render(frame: &mut Frame, tabs: Rect, area: Rect, app: &mut App) {
         frame.render_widget(
             Paragraph::new("Open a file from the explorer or press Ctrl+P")
                 .style(theme.text())
-                .block(theme.panel(" Editor ")),
+                .block(theme.panel(" Editor ", app.focus == crate::app::state::Focus::Editor)),
             area,
         );
         return;
@@ -147,7 +147,7 @@ pub fn render(frame: &mut Frame, tabs: Rect, area: Rect, app: &mut App) {
     frame.render_widget(
         Paragraph::new(lines)
             .style(theme.text())
-            .block(theme.panel(&title)),
+            .block(theme.panel(&title, app.focus == crate::app::state::Focus::Editor)),
         area,
     );
 
@@ -165,7 +165,17 @@ pub fn render(frame: &mut Frame, tabs: Rect, area: Rect, app: &mut App) {
             {
                 let x = area.x + 1 + gutter + (col - view.viewport.left) as u16;
                 let y = area.y + 1 + (cursor_row - view.viewport.top) as u16;
-                frame.set_cursor_position(TermPos { x, y });
+                if app.focus == crate::app::state::Focus::Editor
+                    && matches!(
+                        app.overlay,
+                        crate::app::state::Overlay::None
+                            | crate::app::state::Overlay::Completion { .. }
+                            | crate::app::state::Overlay::Hover { .. }
+                            | crate::app::state::Overlay::Signature { .. }
+                    )
+                {
+                    frame.set_cursor_position(TermPos { x, y });
+                }
             }
         }
     }
@@ -382,16 +392,16 @@ fn render_diff(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
             .collect()
     };
     frame.render_widget(
-        Paragraph::new(lines).style(theme.text()).block(
-            theme
-                .panel(" Git diff: HEAD ↔ working buffer ")
-                .border_style(Style::default().fg(theme.accent)),
-        ),
+        Paragraph::new(lines).style(theme.text()).block(theme.panel(
+            " Git diff: HEAD ↔ working buffer ",
+            app.focus == crate::app::state::Focus::Editor,
+        )),
         area,
     );
 }
 
 const TAB_CHEVRON: u16 = 2;
+const PANE_MARK: &str = "◧";
 
 struct TabPlacement {
     index: usize,
@@ -411,6 +421,7 @@ fn render_tabs(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     app.tab_hit_boxes.clear();
     app.tab_scroll_left = None;
     app.tab_scroll_right = None;
+    app.pane_mark = None;
     let opened: Vec<(crate::editor::DocumentId, String)> = app
         .order
         .iter()
@@ -424,12 +435,45 @@ fn render_tabs(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
         .active
         .and_then(|id| opened.iter().position(|(tab_id, _)| *tab_id == id));
     let reveal = app.tab_revealed != app.active;
-    let strip = layout_tab_strip(&labels, app.tab_scroll, area.width, active_index, reveal);
+    let mark_w = UnicodeWidthStr::width(PANE_MARK) as u16;
+    let reserved = if area.width > mark_w {
+        mark_w.saturating_add(1)
+    } else {
+        area.width
+    };
+    let mut strip = layout_tab_strip(
+        &labels,
+        app.tab_scroll,
+        area.width.saturating_sub(reserved),
+        active_index,
+        reveal,
+    );
     app.tab_scroll = strip.scroll;
     app.tab_revealed = app.active;
+    if let Some(x) = strip.left.as_mut() {
+        *x = x.saturating_add(reserved);
+    }
+    if let Some(x) = strip.right.as_mut() {
+        *x = x.saturating_add(reserved);
+    }
+    for tab in &mut strip.tabs {
+        tab.x = tab.x.saturating_add(reserved);
+    }
 
     let mut spans = Vec::new();
     let mut cursor = 0u16;
+    if mark_w > 0 && area.width >= mark_w {
+        spans.push(Span::styled(
+            PANE_MARK,
+            Style::default().fg(theme.accent).bg(theme.bg),
+        ));
+        cursor = mark_w;
+        app.pane_mark = Some((area.x, area.y, mark_w));
+        if reserved > mark_w {
+            spans.push(Span::styled(" ", Style::default().bg(theme.bg)));
+            cursor = reserved;
+        }
+    }
     if let Some(x) = strip.left {
         push_gap(&mut spans, &mut cursor, x);
         spans.push(Span::styled("<<", Style::default().fg(theme.fg_dim)));
@@ -439,14 +483,22 @@ fn render_tabs(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     for placed in &strip.tabs {
         push_gap(&mut spans, &mut cursor, placed.x);
         let id = opened[placed.index].0;
-        let mut style = Style::default().fg(theme.fg_muted);
-        if app.active == Some(id) {
+        let active = app.active == Some(id);
+        let bg = if active { theme.bg_current } else { theme.bg };
+        let mut style = Style::default().fg(theme.fg_muted).bg(bg);
+        if active {
             style = Style::default()
-                .fg(theme.fg)
-                .bg(theme.bg_selected)
+                .fg(theme.accent)
+                .bg(bg)
                 .add_modifier(Modifier::BOLD);
         }
-        spans.push(Span::styled(placed.label.clone(), style));
+        if let Some((left, right)) = placed.label.split_once('•') {
+            spans.push(Span::styled(left.to_string(), style));
+            spans.push(Span::styled("•", Style::default().fg(theme.warning).bg(bg)));
+            spans.push(Span::styled(right.to_string(), style));
+        } else {
+            spans.push(Span::styled(placed.label.clone(), style));
+        }
         if let Some(hit_box) = tab_hit_box(
             id,
             area.x.saturating_add(placed.x),

@@ -26,12 +26,12 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME#v}"
-          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "p0-ide") | .version')"
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "r3vu") | .version')"
           test "$tag" = "$version"
 
-      # The first upload needs a crates.io API token stored as CARGO_REGISTRY_TOKEN.
-      # After that crate exists, add a Trusted Publisher for Pulko/p0 and this
-      # file (release.yml), delete the secret, and later tags use OIDC instead.
+      # r3vu is a new crate. The first tag needs the API token, or a Trusted
+      # Publisher registered for r3vu on Pulko/p0 and this file. The publisher
+      # already used for p0-ide does not cover the new name.
       - name: Sign in with trusted publishing
         id: auth
         if: env.CARGO_REGISTRY_TOKEN == ''

@@ -1,3 +1,4 @@
+mod agent;
 mod app;
 mod editor;
 mod input;
@@ -154,6 +155,8 @@ async fn main() -> anyhow::Result<()> {
     app.git_status_tx = git_status_tx;
     let (diff_tx, mut diff_rx) = mpsc::unbounded_channel();
     app.diff_tx = diff_tx;
+    let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
+    app.agent_tx = agent_tx;
     app.refresh_git_status();
     if app.explorer_entries.iter().any(|e| e.name == "src") {
         // leave explorer as-is
@@ -200,6 +203,11 @@ async fn main() -> anyhow::Result<()> {
                     app::commands::handle_watch(&mut app, event);
                 }
             }
+            event = agent_rx.recv() => {
+                if let Some(event) = event {
+                    app::commands::handle_agent(&mut app, event);
+                }
+            }
             _ = ready_in(hover_delay) => {
                 app::commands::poll_hover(&mut app);
             }
@@ -209,6 +217,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    app::commands::stop_agent(&mut app);
     let _ = app.lsp.tx.send(LspCmd::Shutdown);
     restore_terminal();
     Ok(())

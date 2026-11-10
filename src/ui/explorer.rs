@@ -7,18 +7,42 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
-use crate::app::state::{Focus, HeaderAction, HeaderHit};
+use crate::app::state::{Focus, HeaderAction, HeaderHit, Overlay, SearchKind};
 use crate::ui::theme::Theme;
 use crate::workspace::GitFileStatus;
 
 pub fn render_search(frame: &mut Frame, area: Rect, app: &mut App) {
     app.header_hits.clear();
     let theme = app.theme();
-    let accent = Style::default().fg(theme.accent).bg(theme.bg);
+    let find_on = matches!(
+        app.overlay,
+        Overlay::Search {
+            kind: SearchKind::Find,
+            ..
+        }
+    );
+    let search_on = matches!(
+        app.overlay,
+        Overlay::Search {
+            kind: SearchKind::Content,
+            ..
+        }
+    );
+    let tool = |on| {
+        if on {
+            Style::default()
+                .fg(theme.on_accent)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.accent).bg(theme.bg)
+        }
+    };
     let find = " Find ";
     let search = " Search ";
     let find_width = UnicodeWidthStr::width(find) as u16;
     let search_width = UnicodeWidthStr::width(search) as u16;
+    let search_x = area.x.saturating_add(find_width).saturating_add(1);
     app.header_hits.push(HeaderHit {
         action: HeaderAction::Find,
         x: area.x,
@@ -26,15 +50,20 @@ pub fn render_search(frame: &mut Frame, area: Rect, app: &mut App) {
     });
     app.header_hits.push(HeaderHit {
         action: HeaderAction::Search,
-        x: area.x.saturating_add(find_width).saturating_add(1),
+        x: search_x,
         width: search_width,
     });
+    let row_bg = Style::default().bg(theme.bg);
+    let used = find_width.saturating_add(search_width).saturating_add(1);
+    let rest = " ".repeat(area.width.saturating_sub(used) as usize);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(find, accent),
-            Span::styled(" ", Style::default().bg(theme.bg)),
-            Span::styled(search, accent),
-        ])),
+            Span::styled(find, tool(find_on)),
+            Span::styled(" ", row_bg),
+            Span::styled(search, tool(search_on)),
+            Span::styled(rest, row_bg),
+        ]))
+        .style(row_bg),
         area,
     );
 }
@@ -94,7 +123,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(lines)
             .style(theme.text())
-            .block(theme.panel(" Explorer ")),
+            .block(theme.panel(" Explorer ", app.focus == Focus::Explorer)),
         area,
     );
 }

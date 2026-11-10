@@ -6,9 +6,7 @@ use crate::language::{LspEvent, LspStatus};
 
 pub fn handle_lsp(app: &mut App, event: LspEvent) {
     match event {
-        LspEvent::Status(status) => {
-            app.lsp_status = status;
-        }
+        LspEvent::Status(status) => apply_lsp_status(app, status),
         LspEvent::Diagnostics { path, mut items } => {
             if let Some(doc) = app
                 .documents
@@ -107,12 +105,24 @@ pub fn handle_lsp(app: &mut App, event: LspEvent) {
     }
 }
 
+pub fn apply_lsp_status(app: &mut App, status: LspStatus) {
+    let missing = matches!(status, LspStatus::Unavailable(_));
+    let ready = matches!(status, LspStatus::Ready);
+    app.lsp_status = status;
+    if ready && matches!(app.overlay, Overlay::TypesNote) {
+        app.overlay = Overlay::None;
+        return;
+    }
+    if missing && !app.config.types_note_dismissed && matches!(app.overlay, Overlay::None) {
+        app.overlay = Overlay::TypesNote;
+    }
+}
+
 pub fn status_text(status: &LspStatus) -> String {
     match status {
-        LspStatus::Ready => "LSP ready".into(),
-        LspStatus::Starting => "LSP starting".into(),
-        LspStatus::Unavailable(s) => format!("LSP off ({s})"),
-        LspStatus::Error(s) => format!("LSP error ({s})"),
+        LspStatus::Ready | LspStatus::Starting => "Types".into(),
+        LspStatus::Unavailable(_) => "⊘ types off".into(),
+        LspStatus::Error(_) => "Types stopped".into(),
     }
 }
 
@@ -177,4 +187,72 @@ pub fn note_click(app: &mut App, x: u16, y: u16) -> bool {
     let dbl = click_was_double(app.last_click, x, y);
     app.last_click = Some((std::time::Instant::now(), x, y));
     dbl
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use tokio::sync::mpsc;
+
+    use crate::app::state::{App, Overlay};
+    use crate::language::{LanguageClient, LspCmd, LspStatus};
+
+    use super::{apply_lsp_status, status_text};
+
+    #[test]
+    fn status_names_types_without_calling_it_an_error() {
+        assert_eq!(status_text(&LspStatus::Ready), "Types");
+        assert_eq!(status_text(&LspStatus::Starting), "Types");
+        assert_eq!(
+            status_text(&LspStatus::Unavailable("missing".into())),
+            "⊘ types off"
+        );
+        assert_eq!(
+            status_text(&LspStatus::Error("language server exited".into())),
+            "Types stopped"
+        );
+    }
+
+    #[test]
+    fn a_missing_server_opens_the_note_once() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(PathBuf::from("."), LanguageClient { tx });
+        app.config.types_note_dismissed = false;
+        app.overlay = Overlay::None;
+        apply_lsp_status(
+            &mut app,
+            LspStatus::Unavailable("typescript-language-server not found".into()),
+        );
+        assert!(matches!(app.overlay, Overlay::TypesNote));
+        app.overlay = Overlay::None;
+        app.config.types_note_dismissed = true;
+        apply_lsp_status(
+            &mut app,
+            LspStatus::Unavailable("typescript-language-server not found".into()),
+        );
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn types_ready_closes_the_note_without_remembering_a_dismissal() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(PathBuf::from("."), LanguageClient { tx });
+        app.overlay = Overlay::TypesNote;
+        app.config.types_note_dismissed = false;
+        apply_lsp_status(&mut app, LspStatus::Ready);
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(!app.config.types_note_dismissed);
+    }
+
+    #[test]
+    fn refresh_asks_the_language_server_to_start_again() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new(PathBuf::from("."), LanguageClient { tx });
+        let _ = rx.try_recv();
+        app.lsp_status = LspStatus::Unavailable("missing".into());
+        crate::app::commands::refresh_types(&mut app);
+        assert!(matches!(app.lsp_status, LspStatus::Starting));
+        assert!(matches!(rx.try_recv(), Ok(LspCmd::Restart { .. })));
+    }
 }

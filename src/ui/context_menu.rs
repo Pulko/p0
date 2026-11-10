@@ -63,7 +63,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let theme = app.theme();
     frame.render_widget(Clear, area);
     frame.render_widget(
-        theme.panel(if show_type { " Symbol " } else { " Actions " }),
+        theme.panel(if show_type { " Symbol " } else { " Actions " }, false),
         area,
     );
     let mut lines = Vec::new();

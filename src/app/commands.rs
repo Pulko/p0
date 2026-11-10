@@ -2,10 +2,12 @@ use std::path::PathBuf;
 
 use ropey::Rope;
 
+use crate::agent::{AgentEvent, AgentRun, Anchor, LineKind, PromptStyle, TranscriptLine};
 use crate::editor::{
-    EditorView, HScrollBar, Movement, Position, Range, Selection, clamp_horizontal_left,
-    delete_backward, delete_forward, hscroll_left_at, indent_for_newline, insert_text,
-    max_line_display_width, move_cursor, select_word_at, selected_text, set_cursor, word_bounds,
+    DocumentChange, DocumentId, EditorView, HScrollBar, Movement, Position, Range, Selection,
+    clamp_horizontal_left, delete_backward, delete_forward, hscroll_left_at, indent_for_newline,
+    insert_text, line_text, max_line_display_width, move_cursor, select_word_at, selected_text,
+    set_cursor, word_bounds,
 };
 use crate::language::{
     CompletionItem, LspCmd, LspStatus, completion_prefix, filter_completions, strip_snippets,
@@ -710,6 +712,19 @@ pub fn submit_prompt(app: &mut App) {
                 }
             }
         }
+        PromptKind::AgentEdit => {
+            let message = input.trim().to_string();
+            if message.is_empty() {
+                return;
+            }
+            if app.thread.prior.is_empty() {
+                app.thread.style = PromptStyle::Edit;
+            }
+            app.thread.anchor = capture_anchor(app);
+            app.thread_visible = true;
+            app.focus = Focus::Thread;
+            send_message(app, message);
+        }
         PromptKind::RenameSymbol => {
             let Some((path, position)) = lsp_target(app) else {
                 return;
@@ -937,6 +952,7 @@ pub fn overlay_submit(app: &mut App) {
             app.overlay = Overlay::None;
         }
         Overlay::SearchFile { .. } | Overlay::Help => {}
+        Overlay::TypesNote => dismiss_types_note(app),
         _ => app.overlay = Overlay::None,
     }
 }
@@ -958,6 +974,47 @@ pub fn open_themes(app: &mut App) {
     app.overlay = Overlay::Themes { selected };
 }
 
+pub fn click_help(app: &mut App, y: u16) {
+    if app.overlay_rows.iter().any(|(_, row)| *row == y) {
+        toggle_claude(app);
+    }
+}
+
+pub fn toggle_claude(app: &mut App) {
+    app.config.claude_enabled = !app.config.claude_enabled;
+    if !app.config.claude_enabled {
+        if app.thread.running {
+            stop_agent(app);
+        }
+        app.thread_visible = false;
+        if app.focus == Focus::Thread {
+            app.focus = Focus::Editor;
+        }
+    }
+    let state = if app.config.claude_enabled {
+        "on"
+    } else {
+        "off"
+    };
+    app.message = if let Err(err) = app.config.save() {
+        Some(format!("Claude {state} (not saved: {err})"))
+    } else {
+        Some(format!("Claude {state}"))
+    };
+}
+
+pub fn claude_ready(app: &mut App) -> bool {
+    if !app.config.claude_enabled {
+        app.message = Some("Claude is off. Turn it on in Settings".into());
+        return false;
+    }
+    if !app.claude_installed {
+        app.message = Some("claude is not installed".into());
+        return false;
+    }
+    true
+}
+
 pub fn click_themes(app: &mut App, y: u16) {
     let Some(index) = app
         .overlay_rows
@@ -973,7 +1030,49 @@ pub fn click_themes(app: &mut App, y: u16) {
     app.overlay = Overlay::None;
 }
 
+pub fn click_types_status(app: &mut App) {
+    if which::which("typescript-language-server").is_ok() {
+        refresh_types(app);
+    } else {
+        app.overlay = Overlay::TypesNote;
+    }
+}
+
+pub fn refresh_types(app: &mut App) {
+    app.lsp_status = LspStatus::Starting;
+    let _ = app.lsp.tx.send(LspCmd::Restart {
+        root: app.root.clone(),
+    });
+}
+
+pub const TYPES_INSTALL: &str = "npm install -g typescript typescript-language-server";
+
+pub fn click_types_note(app: &mut App, x: u16, y: u16) {
+    let Some((hit_x, hit_y, width)) = app.types_copy else {
+        return;
+    };
+    if y == hit_y && x >= hit_x && x < hit_x.saturating_add(width) {
+        app.clipboard.copy(TYPES_INSTALL);
+        app.message = Some("Copied".into());
+    }
+}
+
+pub fn dismiss_types_note(app: &mut App) {
+    app.overlay = Overlay::None;
+    if app.config.types_note_dismissed {
+        return;
+    }
+    app.config.types_note_dismissed = true;
+    if let Err(err) = app.config.save() {
+        app.message = Some(format!("note not saved: {err}"));
+    }
+}
+
 pub fn dismiss_overlay(app: &mut App) {
+    if matches!(app.overlay, Overlay::TypesNote) {
+        dismiss_types_note(app);
+        return;
+    }
     if !matches!(app.overlay, Overlay::None) {
         app.overlay = Overlay::None;
     }
@@ -1043,8 +1142,8 @@ pub fn explorer_activate(app: &mut App) {
     }
 }
 
-pub fn editor_context_labels() -> [&'static str; 2] {
-    ["Go to Definition", "Find References"]
+pub fn editor_context_labels() -> [&'static str; 3] {
+    ["Go to Definition", "Find References", "Ask Claude"]
 }
 
 pub fn show_editor_menu(app: &mut App, x: u16, y: u16) {
@@ -1072,6 +1171,11 @@ pub fn show_editor_menu(app: &mut App, x: u16, y: u16) {
                 label: editor_context_labels()[1].into(),
                 action: MenuAction::FindReferences,
                 enabled: lsp_ok,
+            },
+            MenuItem {
+                label: editor_context_labels()[2].into(),
+                action: MenuAction::AskClaude,
+                enabled: app.config.claude_enabled && app.claude_installed,
             },
         ],
     };
@@ -1197,6 +1301,7 @@ pub fn run_menu(app: &mut App, action: MenuAction) {
             let ids = app.order.clone();
             app.close_documents(&ids, false);
         }
+        MenuAction::AskClaude => start_thread(app),
         MenuAction::DeletePath => {
             if let Some(entry) = app.explorer_entries.get(app.explorer_selected) {
                 app.overlay = Overlay::Confirm {
@@ -1248,6 +1353,9 @@ pub fn handle_watch(app: &mut App, event: WatchEvent) {
                 return;
             }
         }
+    }
+    if app.thread.running {
+        return;
     }
     if dirty {
         app.message = Some(format!("file changed on disk: {}", path.display()));
@@ -1480,6 +1588,45 @@ pub fn scroll_editor_horizontal(app: &mut App, delta: i32) {
     assign_horizontal(app, current as i32 + delta);
 }
 
+pub fn begin_explorer_resize(app: &mut App, x: u16, y: u16) -> bool {
+    if !app.explorer_visible || app.explorer_area.2 == 0 {
+        return false;
+    }
+    let edge = app.explorer_area.0 + app.explorer_area.2 - 1;
+    let top = app.search_area.1.min(app.explorer_area.1);
+    let bottom = app.explorer_area.1.saturating_add(app.explorer_area.3);
+    if x != edge || y < top || y >= bottom {
+        return false;
+    }
+    app.explorer_resizing = true;
+    true
+}
+
+pub fn drag_explorer_resize(app: &mut App, x: u16) {
+    if !app.explorer_resizing {
+        return;
+    }
+    app.config.explorer_width = crate::ui::layout::stored_explorer_width(
+        app.status_area.2,
+        app.thread_visible,
+        app.explorer_area.0,
+        x,
+    );
+}
+
+pub fn end_explorer_resize(app: &mut App) {
+    if !app.explorer_resizing {
+        return;
+    }
+    app.explorer_resizing = false;
+    if app.config.explorer_width < crate::app::config::EXPLORER_MIN_WIDTH {
+        app.config.explorer_width = crate::app::config::EXPLORER_MIN_WIDTH;
+    }
+    if let Err(err) = app.config.save() {
+        app.message = Some(format!("explorer width not saved: {err}"));
+    }
+}
+
 pub fn begin_hscroll_drag(app: &mut App, x: u16, y: u16) -> bool {
     let Some(hit) = app.hscroll_hit else {
         return false;
@@ -1546,6 +1693,7 @@ pub enum WheelAction {
     Explorer(i32),
     EditorVertical(i32),
     EditorHorizontal(i32),
+    Thread(i32),
     None,
 }
 
@@ -1553,6 +1701,7 @@ pub fn wheel_action(
     in_popup: bool,
     in_explorer: bool,
     in_editor: bool,
+    in_thread: bool,
     shift: bool,
     axis: WheelAxis,
 ) -> WheelAction {
@@ -1574,10 +1723,319 @@ pub fn wheel_action(
                 WheelAction::None
             }
         }
+        WheelAxis::Vertical(delta) if in_thread => WheelAction::Thread(delta),
         WheelAxis::Vertical(delta) if in_explorer => WheelAction::Explorer(delta),
         WheelAxis::Vertical(delta) if in_editor => WheelAction::EditorVertical(delta),
         WheelAxis::Vertical(_) => WheelAction::None,
     }
+}
+
+pub fn start_thread(app: &mut App) {
+    if !claude_ready(app) {
+        return;
+    }
+    if app.thread.running {
+        app.message = Some("Claude is still working".into());
+        return;
+    }
+    app.thread.anchor = capture_anchor(app);
+    if app.thread.prior.is_empty() {
+        app.thread.style = PromptStyle::Chat;
+    }
+    app.thread_visible = true;
+    app.focus = Focus::Thread;
+    app.overlay = Overlay::None;
+}
+
+pub fn prompt_agent_edit(app: &mut App) {
+    if !claude_ready(app) {
+        return;
+    }
+    if app.thread.running {
+        app.message = Some("Claude is still working".into());
+        return;
+    }
+    app.overlay = Overlay::Prompt {
+        title: "Edit with Claude".into(),
+        input: String::new(),
+        kind: PromptKind::AgentEdit,
+    };
+}
+
+pub fn send_thread(app: &mut App) {
+    let message = app.thread.compose.trim().to_string();
+    if message.is_empty() {
+        return;
+    }
+    app.thread.compose.clear();
+    send_message(app, message);
+}
+
+pub fn stop_agent(app: &mut App) {
+    if let Some(run) = app.agent_run.take() {
+        run.stop();
+    }
+}
+
+pub fn scroll_thread(app: &mut App, delta: i32) {
+    if delta > 0 {
+        app.thread.scroll = app.thread.scroll.saturating_sub(delta as usize);
+    } else {
+        app.thread.scroll = app
+            .thread
+            .scroll
+            .saturating_add(delta.unsigned_abs() as usize);
+    }
+}
+
+fn send_message(app: &mut App, message: String) {
+    if !claude_ready(app) {
+        return;
+    }
+    if app.thread.running {
+        app.message = Some("Claude is still working".into());
+        return;
+    }
+    let replay = !app.thread.prior.is_empty() && !app.thread.live;
+    let prompt = crate::agent::compose_prompt(
+        app.thread.style,
+        app.thread.anchor.as_ref(),
+        &app.thread.prior,
+        &message,
+        replay,
+    );
+    let resume = app.thread.live;
+    let session_id = app.thread.session_id.clone();
+    app.thread.lines.push(TranscriptLine {
+        kind: LineKind::User,
+        text: message.clone(),
+    });
+    app.thread.pending_user = message;
+    app.thread.reply_buf.clear();
+    app.thread.failure = None;
+    app.thread.saw_session = false;
+    app.thread.running = true;
+    app.thread.scroll = 0;
+    app.thread_visible = true;
+    app.focus = Focus::Thread;
+    if let Some(run) = app.agent_run.take() {
+        run.stop();
+    }
+    let run = AgentRun::new();
+    app.agent_run = Some(run.clone());
+    crate::agent::spawn_turn(
+        app.root.clone(),
+        prompt,
+        session_id,
+        resume,
+        app.agent_tx.clone(),
+        run,
+    );
+}
+
+pub fn handle_agent(app: &mut App, event: AgentEvent) {
+    app.thread.spinner = app.thread.spinner.wrapping_add(1);
+    match event {
+        AgentEvent::Session => app.thread.saw_session = true,
+        AgentEvent::Text { text, block } => append_reply(app, &text, block),
+        AgentEvent::Tool { label } => {
+            app.thread.reply_buf.clear();
+            app.thread.lines.push(TranscriptLine {
+                kind: LineKind::Tool,
+                text: label,
+            });
+        }
+        AgentEvent::Failure { text } => app.thread.failure = Some(text),
+        AgentEvent::Result { text } => {
+            if app.thread.reply_buf.trim().is_empty() {
+                append_reply(app, &text, true);
+            }
+        }
+        AgentEvent::Finished { success, stderr } => finish_turn(app, success, stderr),
+    }
+}
+
+fn append_reply(app: &mut App, text: &str, block: bool) {
+    if block && !app.thread.reply_buf.is_empty() && !app.thread.reply_buf.ends_with("\n\n") {
+        app.thread.reply_buf.push_str("\n\n");
+    }
+    app.thread.reply_buf.push_str(text);
+    let reply = app.thread.reply_buf.clone();
+    if let Some(line) = app.thread.lines.last_mut()
+        && line.kind == LineKind::Reply
+    {
+        line.text = reply;
+    } else {
+        app.thread.lines.push(TranscriptLine {
+            kind: LineKind::Reply,
+            text: reply,
+        });
+    }
+}
+
+fn finish_turn(app: &mut App, success: bool, stderr: String) {
+    let failure = app.thread.failure.clone();
+    let saw_session = app.thread.saw_session;
+    app.thread.running = false;
+    app.agent_run = None;
+    if success || saw_session {
+        app.thread.live = true;
+    }
+    let failed = !success || failure.is_some();
+    if failed && app.thread.reply_buf.trim().is_empty() {
+        let mut text = failure.unwrap_or_default();
+        let stderr = stderr.trim();
+        if !stderr.is_empty() {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(stderr);
+        }
+        if text.is_empty() {
+            text = "Claude stopped".into();
+        }
+        app.thread.lines.push(TranscriptLine {
+            kind: LineKind::Error,
+            text,
+        });
+    }
+    let user = std::mem::take(&mut app.thread.pending_user);
+    let reply = app.thread.reply_buf.clone();
+    if !user.is_empty() {
+        app.thread.prior.push((user, reply));
+    }
+    app.thread.reply_buf.clear();
+    settle_agent_edits(app);
+}
+
+pub fn settle_agent_edits(app: &mut App) {
+    let ids: Vec<DocumentId> = app.documents.keys().copied().collect();
+    let mut dirty_note = None;
+    for id in ids {
+        match refresh_from_disk(app, id) {
+            DiskRefresh::Dirty(path) => {
+                dirty_note = Some(format!("file changed on disk: {}", path.display()));
+            }
+            DiskRefresh::Reloaded | DiskRefresh::Same | DiskRefresh::Skipped => {}
+        }
+    }
+    if let Some(note) = dirty_note {
+        app.message = Some(note);
+    }
+}
+
+enum DiskRefresh {
+    Same,
+    Dirty(PathBuf),
+    Reloaded,
+    Skipped,
+}
+
+fn refresh_from_disk(app: &mut App, id: DocumentId) -> DiskRefresh {
+    let Some((path, current, dirty)) = app
+        .documents
+        .get(&id)
+        .and_then(|doc| Some((doc.path.clone()?, doc.text(), doc.is_dirty())))
+    else {
+        return DiskRefresh::Skipped;
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return DiskRefresh::Skipped;
+    };
+    let Ok(text) = String::from_utf8(bytes) else {
+        return DiskRefresh::Skipped;
+    };
+    if text == current {
+        if let Some(doc) = app.documents.get_mut(&id) {
+            doc.mtime = std::fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .ok();
+        }
+        return DiskRefresh::Same;
+    }
+    if dirty {
+        return DiskRefresh::Dirty(path);
+    }
+    let reloaded = {
+        let Some(doc) = app.documents.get_mut(&id) else {
+            return DiskRefresh::Skipped;
+        };
+        if doc.replace_from_disk().is_err() {
+            return DiskRefresh::Skipped;
+        }
+        (doc.language, doc.rope.clone(), doc.revision, doc.text())
+    };
+    let (language, rope, revision, full) = reloaded;
+    app.syntax.close(id);
+    app.syntax.open(id, language, &rope);
+    let _ = app.lsp.tx.send(LspCmd::DidChange {
+        path: path.clone(),
+        version: revision as i64,
+        change: full_document_change(id, revision, full.clone()),
+        full_text: full,
+        incremental: false,
+    });
+    if let Some(view) = app.views.get_mut(&id) {
+        let len = rope.len_lines().max(1);
+        if view.cursor.line >= len {
+            view.cursor.line = len - 1;
+            view.cursor.column = 0;
+        }
+        view.selection = None;
+    }
+    app.request_inline_diff(id);
+    DiskRefresh::Reloaded
+}
+
+fn full_document_change(id: DocumentId, revision: u64, text: String) -> DocumentChange {
+    let origin = Position::default();
+    DocumentChange {
+        document_id: id,
+        revision,
+        start_byte: 0,
+        old_end_byte: 0,
+        new_end_byte: text.len(),
+        start_char: 0,
+        old_end_char: 0,
+        new_end_char: text.chars().count(),
+        start_position: origin,
+        old_end_position: origin,
+        new_end_position: origin,
+        start_row: 0,
+        start_byte_column: 0,
+        old_end_row: 0,
+        old_end_byte_column: 0,
+        new_end_row: 0,
+        new_end_byte_column: 0,
+        inserted_text: text,
+        deleted_text: String::new(),
+    }
+}
+
+fn capture_anchor(app: &App) -> Option<Anchor> {
+    let doc = app.active_doc()?;
+    let view = app.active_view()?;
+    let path = app.relative(doc.path.as_ref()?);
+    let (start, end) =
+        if let Some(selection) = view.selection.filter(|selection| !selection.is_empty()) {
+            let range = selection.range();
+            (range.start.line, range.end.line)
+        } else {
+            (view.cursor.line, view.cursor.line)
+        };
+    let mut snippet = Vec::new();
+    for line in start..=end {
+        if snippet.len() >= 40 {
+            break;
+        }
+        snippet.push(line_text(&doc.rope, line));
+    }
+    Some(Anchor {
+        path,
+        start_line: start + 1,
+        end_line: end.min(start + snippet.len().saturating_sub(1)) + 1,
+        snippet: snippet.join("\n"),
+    })
 }
 
 pub fn click_explorer(app: &mut App, y: u16) {
@@ -1606,6 +2064,15 @@ mod tests {
         wheel_action,
     };
 
+    fn with_runtime<T>(body: impl FnOnce() -> T) -> T {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        body()
+    }
+
     fn app_with_tabs(count: usize) -> (App, Vec<DocumentId>) {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut app = App::new(PathBuf::from("."), LanguageClient { tx });
@@ -1617,45 +2084,62 @@ mod tests {
     }
 
     #[test]
+    fn claude_stays_closed_until_it_is_enabled() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(PathBuf::from("."), LanguageClient { tx });
+        app.config.claude_enabled = false;
+        super::start_thread(&mut app);
+        assert!(!app.thread_visible);
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Claude is off. Turn it on in Settings")
+        );
+    }
+
+    #[test]
     fn editor_menu_keeps_navigation_actions_only() {
         assert_eq!(
             editor_context_labels(),
-            ["Go to Definition", "Find References"]
+            ["Go to Definition", "Find References", "Ask Claude"]
         );
     }
 
     #[test]
     fn wheel_follows_the_pane_under_the_pointer() {
         assert_eq!(
-            wheel_action(false, true, false, false, WheelAxis::Vertical(3)),
+            wheel_action(false, true, false, false, false, WheelAxis::Vertical(3)),
             WheelAction::Explorer(3)
         );
         assert_eq!(
-            wheel_action(false, false, true, false, WheelAxis::Vertical(-3)),
+            wheel_action(false, false, true, false, false, WheelAxis::Vertical(-3)),
             WheelAction::EditorVertical(-3)
         );
         assert_eq!(
-            wheel_action(false, false, false, false, WheelAxis::Vertical(3)),
+            wheel_action(false, false, false, true, false, WheelAxis::Vertical(3)),
+            WheelAction::Thread(3)
+        );
+        assert_eq!(
+            wheel_action(false, false, false, false, false, WheelAxis::Vertical(3)),
             WheelAction::None
         );
         assert_eq!(
-            wheel_action(true, true, true, false, WheelAxis::Vertical(3)),
+            wheel_action(true, true, true, true, false, WheelAxis::Vertical(3)),
             WheelAction::None
         );
         assert_eq!(
-            wheel_action(false, true, false, true, WheelAxis::Vertical(3)),
+            wheel_action(false, true, false, false, true, WheelAxis::Vertical(3)),
             WheelAction::None
         );
         assert_eq!(
-            wheel_action(false, false, true, true, WheelAxis::Vertical(3)),
+            wheel_action(false, false, true, false, true, WheelAxis::Vertical(3)),
             WheelAction::EditorHorizontal(4)
         );
         assert_eq!(
-            wheel_action(false, false, true, false, WheelAxis::Horizontal(-4)),
+            wheel_action(false, false, true, false, false, WheelAxis::Horizontal(-4)),
             WheelAction::EditorHorizontal(-4)
         );
         assert_eq!(
-            wheel_action(false, true, false, false, WheelAxis::Horizontal(4)),
+            wheel_action(false, true, false, false, false, WheelAxis::Horizontal(4)),
             WheelAction::None
         );
     }
@@ -1705,5 +2189,91 @@ mod tests {
         assert!(matches!(app.overlay, Overlay::None));
         assert_eq!(app.order, vec![ids[0]]);
         assert_eq!(app.active, Some(ids[0]));
+    }
+
+    #[test]
+    fn a_running_turn_does_not_ask_to_reload() {
+        let dir = std::env::temp_dir().join(format!("p0-watch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("file.ts");
+        std::fs::write(&path, "const a = 1;\n").unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = with_runtime(|| {
+            let mut app = App::new(dir, LanguageClient { tx });
+            app.open_path(path.clone());
+            app
+        });
+        app.documents.values_mut().next().unwrap().mtime = Some(std::time::SystemTime::UNIX_EPOCH);
+        std::fs::write(&path, "const a = 2;\n").unwrap();
+        app.thread.running = true;
+        super::handle_watch(
+            &mut app,
+            crate::workspace::WatchEvent {
+                path: path.clone(),
+                kind: crate::workspace::WatchKind::Modify,
+            },
+        );
+        assert!(matches!(app.overlay, Overlay::None));
+        app.thread.running = false;
+        super::handle_watch(
+            &mut app,
+            crate::workspace::WatchEvent {
+                path: path.clone(),
+                kind: crate::workspace::WatchKind::Modify,
+            },
+        );
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm {
+                action: ConfirmAction::Reload(_),
+                ..
+            }
+        ));
+        let _ = std::fs::remove_dir_all(app.root.clone());
+    }
+
+    #[test]
+    fn settle_reloads_clean_buffers_and_keeps_dirty_ones() {
+        let dir = std::env::temp_dir().join(format!("p0-settle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let clean = dir.join("clean.ts");
+        let dirty = dir.join("dirty.ts");
+        std::fs::write(&clean, "export const clean = 1;\n").unwrap();
+        std::fs::write(&dirty, "export const dirty = 1;\n").unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = with_runtime(|| {
+            let mut app = App::new(dir, LanguageClient { tx });
+            app.open_path(clean.clone());
+            app.open_path(dirty.clone());
+            app
+        });
+        let dirty_id = app
+            .documents
+            .iter()
+            .find(|(_, doc)| doc.path.as_ref() == Some(&dirty))
+            .map(|(id, _)| *id)
+            .unwrap();
+        app.documents.get_mut(&dirty_id).unwrap().revision = 1;
+        std::fs::write(&clean, "export const clean = 2;\n").unwrap();
+        std::fs::write(&dirty, "export const dirty = 2;\n").unwrap();
+        with_runtime(|| super::settle_agent_edits(&mut app));
+        let clean_text = app
+            .documents
+            .values()
+            .find(|doc| doc.path.as_ref() == Some(&clean))
+            .unwrap()
+            .text();
+        let dirty_text = app.documents.get(&dirty_id).unwrap().text();
+        assert_eq!(clean_text, "export const clean = 2;\n");
+        assert_eq!(dirty_text, "export const dirty = 1;\n");
+        assert!(
+            app.message
+                .as_deref()
+                .unwrap_or("")
+                .contains("changed on disk")
+        );
+        let _ = std::fs::remove_dir_all(app.root.clone());
     }
 }
