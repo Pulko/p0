@@ -2186,6 +2186,10 @@ pub fn receive_git_write(app: &mut App, result: crate::workspace::GitWriteResult
         if let Some(path) = reload {
             app.reload_clean_document(&path);
         }
+        let open = app.order.clone();
+        for id in open {
+            app.request_inline_diff(id);
+        }
     }
     app.refresh_git_status();
     app.refresh_open_file_diff();

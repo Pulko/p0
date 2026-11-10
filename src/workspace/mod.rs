@@ -147,14 +147,14 @@ impl HunkReplacement {
 
 #[derive(Clone, Debug)]
 pub enum DiffBaseline {
-    Head(String),
+    Index(String),
     Absent,
 }
 
 impl DiffBaseline {
     pub fn original(&self) -> &str {
         match self {
-            DiffBaseline::Head(text) => text,
+            DiffBaseline::Index(text) => text,
             DiffBaseline::Absent => "",
         }
     }
@@ -983,7 +983,7 @@ pub fn spawn_git_diff(
 ) {
     tokio::spawn(async move {
         let relative = path.strip_prefix(&root).unwrap_or(&path);
-        let spec = format!("HEAD:{}", relative.to_string_lossy().replace('\\', "/"));
+        let spec = format!(":{}", relative.to_string_lossy().replace('\\', "/"));
         let output = Command::new("git")
             .arg("-C")
             .arg(&root)
@@ -996,7 +996,7 @@ pub fn spawn_git_diff(
                 let original = String::from_utf8_lossy(&output.stdout).into_owned();
                 GitDiffResult {
                     document_id,
-                    baseline: Some(DiffBaseline::Head(original)),
+                    baseline: Some(DiffBaseline::Index(original)),
                 }
             }
             Ok(output) => {
@@ -1823,6 +1823,9 @@ index 111..222 100644
         ));
         assert!(path_absent_from_head(
             "path 'src/new.ts' does not exist in 'HEAD'"
+        ));
+        assert!(path_absent_from_head(
+            "path 'src/new.ts' exists on disk, but not in the index"
         ));
         assert!(!path_absent_from_head("not a git repository"));
     }
