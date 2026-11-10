@@ -17,18 +17,20 @@ struct Piece {
 
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     let theme = app.theme();
-    let (lang, pos) = if let (Some(doc), Some(view)) = (app.active_doc(), app.active_view()) {
-        (
-            doc.language.as_str(),
-            format!(
-                "Ln {}, Col {}",
-                view.cursor.line + 1,
-                view.cursor.column + 1
-            ),
-        )
-    } else {
-        ("", String::new())
-    };
+    let (lang, pos, markdown) =
+        if let (Some(doc), Some(view)) = (app.active_doc(), app.active_view()) {
+            (
+                doc.language.as_str(),
+                format!(
+                    "Ln {}, Col {}",
+                    view.cursor.line + 1,
+                    view.cursor.column + 1
+                ),
+                doc.language == crate::editor::LanguageId::Markdown,
+            )
+        } else {
+            ("", String::new(), false)
+        };
     let diff_style = if app.diff_view.is_some() {
         Style::default()
             .fg(theme.on_accent)
@@ -91,8 +93,15 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         },
         Piece {
             text: format!(" {lang} "),
-            style: Style::default().fg(theme.accent),
-            action: None,
+            style: if markdown && app.markdown_preview_open() {
+                Style::default()
+                    .fg(theme.on_accent)
+                    .bg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.accent)
+            },
+            action: markdown.then_some(StatusAction::Markdown),
         },
         Piece {
             text: format!(" {} ", status_text(&app.lsp_status)),

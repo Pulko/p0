@@ -455,6 +455,8 @@ pub(crate) fn shortcut_rows() -> Vec<(&'static str, &'static str)> {
         ("Ctrl+Z / Y", "Undo / redo"),
         ("Ctrl+Tab", "Next / previous tab"),
         ("Ctrl+Shift+D", "Git diff"),
+        ("Ctrl+Shift+M", "Preview Markdown"),
+        ("Click Markdown", "Preview this file"),
         ("Click ↩", "Revert this change"),
         ("Click ◧", "Show or hide the explorer"),
         ("Ctrl+B", "Toggle explorer"),

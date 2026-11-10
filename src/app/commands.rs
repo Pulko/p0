@@ -47,6 +47,9 @@ pub fn save_active(app: &mut App) {
 
 pub fn type_text(app: &mut App, text: &str) {
     app.diff_view = None;
+    if app.markdown_preview_open() {
+        app.markdown_preview = None;
+    }
     app.hover_dwell = None;
     if !matches!(
         app.overlay,
@@ -122,6 +125,18 @@ pub fn move_sel(app: &mut App, movement: Movement, selecting: bool) {
         }
         return;
     }
+    if app.markdown_preview_open() {
+        match movement {
+            Movement::Up | Movement::Left => app.scroll_markdown_preview(-1),
+            Movement::Down | Movement::Right => app.scroll_markdown_preview(1),
+            Movement::PageUp => app.scroll_markdown_preview(-10),
+            Movement::PageDown => app.scroll_markdown_preview(10),
+            Movement::DocumentStart | Movement::LineStart => app.jump_markdown_preview(false),
+            Movement::DocumentEnd | Movement::LineEnd => app.jump_markdown_preview(true),
+            _ => {}
+        }
+        return;
+    }
     if matches!(app.overlay, Overlay::Completion { .. })
         && matches!(movement, Movement::Up | Movement::Down)
     {
@@ -166,6 +181,9 @@ pub fn backspace(app: &mut App) {
     if overlay_backspace(app) {
         return;
     }
+    if app.markdown_preview_open() {
+        app.markdown_preview = None;
+    }
     let completing = matches!(app.overlay, Overlay::Completion { .. });
     let Some(id) = app.active else { return };
     let changes =
@@ -182,6 +200,9 @@ pub fn backspace(app: &mut App) {
 }
 
 pub fn delete_key(app: &mut App) {
+    if app.markdown_preview_open() {
+        app.markdown_preview = None;
+    }
     let Some(id) = app.active else { return };
     let changes =
         if let (Some(doc), Some(view)) = (app.documents.get_mut(&id), app.views.get_mut(&id)) {
@@ -1369,6 +1390,9 @@ pub fn handle_watch(app: &mut App, event: WatchEvent) {
 
 pub fn click_editor(app: &mut App, x: u16, y: u16, selecting: bool) {
     let Some(id) = app.active else { return };
+    if app.markdown_preview_open() {
+        return;
+    }
     if !selecting && in_revert_column(app, x, y) && shows_revert(app, x, y) {
         if let Some(line) = visual_target_line(app, x, y) {
             app.revert_hunk_at_line(id, line);
@@ -1546,6 +1570,10 @@ pub fn scroll_editor(app: &mut App, delta: i32) {
             .clamp(0, diff.lines.len().saturating_sub(1) as i32) as usize;
         return;
     }
+    if app.markdown_preview_open() {
+        app.scroll_markdown_preview(delta);
+        return;
+    }
     let Some(id) = app.active else { return };
     let max = app.visual_rows(id).len().saturating_sub(1);
     if let Some(view) = app.views.get_mut(&id) {
@@ -1579,6 +1607,9 @@ pub fn reveal_explorer_selection(app: &mut App) {
 }
 
 pub fn scroll_editor_horizontal(app: &mut App, delta: i32) {
+    if app.markdown_preview_open() {
+        return;
+    }
     let Some(id) = app.active else { return };
     let current = app
         .views

@@ -1,5 +1,7 @@
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders};
+
+use crate::syntax::HighlightKind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Theme {
@@ -211,6 +213,35 @@ const EMBER: Theme = Theme {
     search_current: Color::Rgb(224, 170, 80),
     on_accent: Color::Rgb(34, 28, 24),
 };
+
+pub(crate) fn highlight_color(kind: HighlightKind, theme: Theme) -> Color {
+    match kind {
+        HighlightKind::Comment => theme.comment,
+        HighlightKind::String => theme.string,
+        HighlightKind::Number => theme.number,
+        HighlightKind::Keyword => theme.keyword,
+        HighlightKind::Type => theme.type_name,
+        HighlightKind::Function => theme.function,
+        HighlightKind::Property => theme.property,
+        HighlightKind::Constant => theme.constant,
+        HighlightKind::Operator => theme.operator,
+        HighlightKind::Variable => theme.fg,
+        HighlightKind::Heading => theme.type_name,
+        HighlightKind::Emphasis | HighlightKind::Strong => theme.fg,
+        HighlightKind::Strike => theme.fg_dim,
+        HighlightKind::Link => theme.accent,
+    }
+}
+
+pub(crate) fn highlight_modifier(kind: HighlightKind) -> Modifier {
+    match kind {
+        HighlightKind::Heading | HighlightKind::Strong => Modifier::BOLD,
+        HighlightKind::Emphasis => Modifier::ITALIC,
+        HighlightKind::Strike => Modifier::CROSSED_OUT,
+        HighlightKind::Link => Modifier::UNDERLINED,
+        _ => Modifier::empty(),
+    }
+}
 
 #[cfg(test)]
 mod tests {

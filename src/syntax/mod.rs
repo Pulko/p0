@@ -1,8 +1,9 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use ropey::Rope;
 use tree_sitter::{
-    InputEdit, Language, Parser, Point, Query, QueryCursor, StreamingIterator, Tree,
+    InputEdit, Language, Node, Parser, Point, Query, QueryCursor, StreamingIterator, Tree,
 };
 
 use crate::editor::{DocumentChange, DocumentId, LanguageId, Position, byte_to_position};
@@ -19,6 +20,11 @@ pub enum HighlightKind {
     Constant,
     Operator,
     Variable,
+    Heading,
+    Emphasis,
+    Strong,
+    Strike,
+    Link,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -33,8 +39,14 @@ struct Grammar {
     query: Option<Query>,
 }
 
+struct InlineGrammar {
+    parser: RefCell<Parser>,
+    query: Option<Query>,
+}
+
 pub struct SyntaxService {
     grammars: HashMap<LanguageId, Grammar>,
+    markdown_inline: InlineGrammar,
     trees: HashMap<DocumentId, Tree>,
 }
 
@@ -93,8 +105,15 @@ impl SyntaxService {
             tree_sitter_css::LANGUAGE.into(),
             &[tree_sitter_css::HIGHLIGHTS_QUERY, CSS_FALLBACK],
         );
+        install(
+            &mut grammars,
+            LanguageId::Markdown,
+            tree_sitter_md::LANGUAGE.into(),
+            &[tree_sitter_md::HIGHLIGHT_QUERY_BLOCK],
+        );
         Self {
             grammars,
+            markdown_inline: markdown_inline(),
             trees: HashMap::new(),
         }
     }
@@ -152,14 +171,6 @@ impl SyntaxService {
         let Some(tree) = self.trees.get(&id) else {
             return Vec::new();
         };
-        let Some(query) = self
-            .grammars
-            .get(&language)
-            .and_then(|grammar| grammar.query.as_ref())
-        else {
-            return Vec::new();
-        };
-        let mut cursor = QueryCursor::new();
         let start_byte = if from_line < rope.len_lines() {
             rope.line_to_byte(from_line)
         } else {
@@ -170,6 +181,39 @@ impl SyntaxService {
         } else {
             rope.len_bytes()
         };
+        self.highlight_range(tree, language, rope, start_byte, end_byte)
+    }
+
+    pub fn highlight_snippet(&mut self, language: LanguageId, source: &str) -> Vec<HighlightSpan> {
+        let rope = Rope::from_str(source);
+        let tree = {
+            let Some(grammar) = self.grammars.get_mut(&language) else {
+                return Vec::new();
+            };
+            let Some(tree) = grammar.parser.parse(source, None) else {
+                return Vec::new();
+            };
+            tree
+        };
+        self.highlight_range(&tree, language, &rope, 0, source.len())
+    }
+
+    fn highlight_range(
+        &self,
+        tree: &Tree,
+        language: LanguageId,
+        rope: &Rope,
+        start_byte: usize,
+        end_byte: usize,
+    ) -> Vec<HighlightSpan> {
+        let Some(query) = self
+            .grammars
+            .get(&language)
+            .and_then(|grammar| grammar.query.as_ref())
+        else {
+            return Vec::new();
+        };
+        let mut cursor = QueryCursor::new();
         cursor.set_byte_range(start_byte..end_byte);
         let text = rope.to_string();
         let mut captures = cursor.captures(query, tree.root_node(), text.as_bytes());
@@ -177,14 +221,22 @@ impl SyntaxService {
         while let Some((m, idx)) = captures.next() {
             let cap = m.captures()[*idx];
             let name = query.capture_names()[cap.index as usize];
-            if let Some(kind) = kind_from_capture(name) {
-                let node = cap.node;
+            let node = cap.node;
+            let kind = if language == LanguageId::Markdown {
+                markdown_kind(name, node.kind())
+            } else {
+                kind_from_capture(name)
+            };
+            if let Some(kind) = kind {
                 spans.push(HighlightSpan {
                     start: byte_to_position(rope, node.start_byte()),
                     end: byte_to_position(rope, node.end_byte()),
                     kind,
                 });
             }
+        }
+        if language == LanguageId::Markdown {
+            spans.extend(self.inline_highlights(tree, rope, &text, start_byte, end_byte));
         }
         // A JSON key is also a string. Keep the key color when both spans cover it.
         let keys: Vec<_> = spans
@@ -233,6 +285,168 @@ fn install_joined(
         Query::new(&language, &combined).ok()
     });
     grammars.insert(id, Grammar { parser, query });
+}
+
+fn markdown_inline() -> InlineGrammar {
+    let mut parser = Parser::new();
+    let language: Language = tree_sitter_md::INLINE_LANGUAGE.into();
+    if parser.set_language(&language).is_err() {
+        return InlineGrammar {
+            parser: RefCell::new(parser),
+            query: None,
+        };
+    }
+    let with_strike = format!(
+        "{}\n(strikethrough) @text.strike\n",
+        tree_sitter_md::HIGHLIGHT_QUERY_INLINE
+    );
+    let query = Query::new(&language, &with_strike)
+        .ok()
+        .or_else(|| Query::new(&language, tree_sitter_md::HIGHLIGHT_QUERY_INLINE).ok());
+    InlineGrammar {
+        parser: RefCell::new(parser),
+        query,
+    }
+}
+
+impl SyntaxService {
+    fn inline_highlights(
+        &self,
+        tree: &Tree,
+        rope: &Rope,
+        text: &str,
+        start_byte: usize,
+        end_byte: usize,
+    ) -> Vec<HighlightSpan> {
+        let Some(query) = self.markdown_inline.query.as_ref() else {
+            return Vec::new();
+        };
+        let mut parser = self.markdown_inline.parser.borrow_mut();
+        let mut spans = Vec::new();
+        collect_inline(
+            tree.root_node(),
+            rope,
+            text,
+            start_byte,
+            end_byte,
+            &mut parser,
+            query,
+            &mut spans,
+        );
+        spans
+    }
+}
+
+fn collect_inline(
+    node: Node,
+    rope: &Rope,
+    text: &str,
+    start_byte: usize,
+    end_byte: usize,
+    parser: &mut Parser,
+    query: &Query,
+    spans: &mut Vec<HighlightSpan>,
+) {
+    if node.end_byte() <= start_byte || node.start_byte() >= end_byte {
+        return;
+    }
+    if matches!(node.kind(), "inline" | "pipe_table_cell") {
+        highlight_inline_node(node, rope, text, parser, query, spans);
+        return;
+    }
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            collect_inline(
+                cursor.node(),
+                rope,
+                text,
+                start_byte,
+                end_byte,
+                parser,
+                query,
+                spans,
+            );
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+}
+
+fn highlight_inline_node(
+    node: Node,
+    rope: &Rope,
+    text: &str,
+    parser: &mut Parser,
+    query: &Query,
+    spans: &mut Vec<HighlightSpan>,
+) {
+    let start = node.start_byte();
+    let end = node.end_byte();
+    if start >= end || end > text.len() {
+        return;
+    }
+    let slice = &text[start..end];
+    let Some(inline_tree) = parser.parse(slice, None) else {
+        return;
+    };
+    let mut cursor = QueryCursor::new();
+    let mut captures = cursor.captures(query, inline_tree.root_node(), slice.as_bytes());
+    while let Some((m, idx)) = captures.next() {
+        let cap = m.captures()[*idx];
+        let name = query.capture_names()[cap.index as usize];
+        let inline_node = cap.node;
+        let Some(kind) = markdown_kind(name, inline_node.kind()) else {
+            continue;
+        };
+        let span_start = start + inline_node.start_byte();
+        let span_end = start + inline_node.end_byte();
+        if span_end <= span_start {
+            continue;
+        }
+        spans.push(HighlightSpan {
+            start: byte_to_position(rope, span_start),
+            end: byte_to_position(rope, span_end),
+            kind,
+        });
+    }
+}
+
+fn markdown_kind(name: &str, node_kind: &str) -> Option<HighlightKind> {
+    match node_kind {
+        "atx_h1_marker"
+        | "atx_h2_marker"
+        | "atx_h3_marker"
+        | "atx_h4_marker"
+        | "atx_h5_marker"
+        | "atx_h6_marker"
+        | "setext_h1_underline"
+        | "setext_h2_underline" => {
+            return Some(HighlightKind::Heading);
+        }
+        "block_quote_marker" | "block_continuation" => return Some(HighlightKind::Comment),
+        "list_marker_plus"
+        | "list_marker_minus"
+        | "list_marker_star"
+        | "list_marker_dot"
+        | "list_marker_parenthesis"
+        | "thematic_break" => {
+            return Some(HighlightKind::Operator);
+        }
+        "strikethrough" => return Some(HighlightKind::Strike),
+        _ => {}
+    }
+    match name {
+        "text.title" => Some(HighlightKind::Heading),
+        "text.emphasis" => Some(HighlightKind::Emphasis),
+        "text.strong" => Some(HighlightKind::Strong),
+        "text.strike" => Some(HighlightKind::Strike),
+        "text.literal" => Some(HighlightKind::String),
+        "text.uri" | "text.reference" => Some(HighlightKind::Link),
+        "none" => None,
+        _ => kind_from_capture(name),
+    }
 }
 
 fn kind_from_capture(name: &str) -> Option<HighlightKind> {
@@ -372,6 +586,28 @@ mod tests {
         let spans = syntax.highlights(doc.id, doc.language, &doc.rope, 0, 1);
         assert_eq!(kind_at(&spans, 0, 1), Some(HighlightKind::Type));
         assert_eq!(kind_at(&spans, 0, 3), Some(HighlightKind::Property));
+    }
+
+    #[test]
+    fn highlights_markdown_heading_bold_and_code() {
+        let source = "# Title\n\n**bold** and `code` and ~~gone~~\n";
+        let (doc, syntax) = open("a.md", source);
+        assert_eq!(doc.language, LanguageId::Markdown);
+        let spans = syntax.highlights(doc.id, doc.language, &doc.rope, 0, 3);
+        let line = source.lines().nth(2).unwrap();
+        assert_eq!(kind_at(&spans, 0, 2), Some(HighlightKind::Heading));
+        assert_eq!(
+            kind_at(&spans, 2, line.find("bold").unwrap()),
+            Some(HighlightKind::Strong)
+        );
+        assert_eq!(
+            kind_at(&spans, 2, line.find("code").unwrap()),
+            Some(HighlightKind::String)
+        );
+        assert_eq!(
+            kind_at(&spans, 2, line.find("gone").unwrap()),
+            Some(HighlightKind::Strike)
+        );
     }
 
     #[test]

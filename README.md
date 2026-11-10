@@ -27,6 +27,7 @@ Click to place the cursor. Type to insert. There are no modes.
 | Undo / redo | Ctrl+Z / Ctrl+Y |
 | Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab |
 | Git diff | Ctrl+Shift+D |
+| Preview Markdown | Ctrl+Shift+M |
 | Toggle explorer | Ctrl+B |
 | Close file | Ctrl+W |
 | New file | Ctrl+N |
@@ -63,4 +64,4 @@ npm install -g typescript typescript-language-server
 ## Limits
 
 - Git marks need a worktree.
-- JSON, YAML, HTML, and CSS are colored. Types and completion stay TypeScript and JavaScript. Other files still edit and save.
+- JSON, YAML, HTML, CSS, and Markdown are colored. Markdown can be previewed with Ctrl+Shift+M. Types and completion stay TypeScript and JavaScript. Other files still edit and save.

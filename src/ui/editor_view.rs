@@ -10,7 +10,7 @@ use crate::app::App;
 use crate::app::state::{HScrollHit, TabHitBox};
 use crate::editor::{Range, display_col, hscroll_bar, line_text, max_line_display_width};
 use crate::syntax::HighlightKind;
-use crate::ui::theme::Theme;
+use crate::ui::theme::{Theme, highlight_color, highlight_modifier};
 use crate::workspace::{DiffKind, LineChanges, LineMark, VisualRow};
 
 pub fn render(frame: &mut Frame, tabs: Rect, area: Rect, app: &mut App) {
@@ -26,12 +26,6 @@ pub fn render(frame: &mut Frame, tabs: Rect, area: Rect, app: &mut App) {
         );
         return;
     };
-    let Some(doc) = app.documents.get(&id) else {
-        return;
-    };
-    let Some(view) = app.views.get(&id) else {
-        return;
-    };
     if app
         .diff_view
         .as_ref()
@@ -40,6 +34,20 @@ pub fn render(frame: &mut Frame, tabs: Rect, area: Rect, app: &mut App) {
         render_diff(frame, area, app, theme);
         return;
     }
+    if app
+        .markdown_preview
+        .as_ref()
+        .is_some_and(|preview| preview.document_id == id)
+    {
+        render_markdown(frame, area, app, theme);
+        return;
+    }
+    let Some(doc) = app.documents.get(&id) else {
+        return;
+    };
+    let Some(view) = app.views.get(&id) else {
+        return;
+    };
     let tab_width = app.config.tab_width;
     let number_width = ((doc.rope.len_lines().max(1).ilog10() as u16) + 2).max(4);
     let rows = app.visual_rows(id);
@@ -400,6 +408,43 @@ fn render_diff(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     );
 }
 
+fn render_markdown(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
+    let width = area.width.saturating_sub(2) as usize;
+    let height = area.height.saturating_sub(2) as usize;
+    let title = app
+        .markdown_preview
+        .as_ref()
+        .and_then(|preview| app.documents.get(&preview.document_id))
+        .and_then(|doc| doc.path.as_ref().map(|path| app.relative(path)))
+        .map(|name| format!(" Preview {name} "))
+        .unwrap_or_else(|| " Preview ".into());
+    let refresh = app.markdown_preview.as_ref().and_then(|preview| {
+        let doc = app.documents.get(&preview.document_id)?;
+        Some((
+            doc.text(),
+            doc.revision,
+            preview.is_current(doc.revision, theme.name, width.max(1)),
+        ))
+    });
+    if let Some((text, revision, false)) = refresh {
+        let lines = crate::markdown::render(&text, theme, width.max(1), &mut app.syntax);
+        if let Some(preview) = app.markdown_preview.as_mut() {
+            preview.store(lines, revision, theme.name, width.max(1));
+        }
+    }
+    let lines = app
+        .markdown_preview
+        .as_ref()
+        .map(|preview| preview.visible(height.max(1)))
+        .unwrap_or_default();
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(theme.text())
+            .block(theme.panel(&title, app.focus == crate::app::state::Focus::Editor)),
+        area,
+    );
+}
+
 const TAB_CHEVRON: u16 = 2;
 const PANE_MARK: &str = "◧";
 
@@ -746,7 +791,9 @@ fn paint_line(
             style = style.bg(bg);
         }
         if let Some(kind) = highlight_at(highlights, line_idx, start_col) {
-            style = style.fg(color_of(kind, theme));
+            style = style
+                .fg(highlight_color(kind, theme))
+                .add_modifier(highlight_modifier(kind));
         }
         if in_range(sel, line_idx, start_col) {
             style = style.bg(theme.bg_selected);
@@ -809,21 +856,6 @@ fn in_range(sel: Option<Range>, line: usize, col: usize) -> bool {
     let Some(sel) = sel else { return false };
     let pos = crate::editor::Position::new(line, col);
     pos >= sel.start && pos < sel.end
-}
-
-fn color_of(kind: HighlightKind, theme: Theme) -> Color {
-    match kind {
-        HighlightKind::Comment => theme.comment,
-        HighlightKind::String => theme.string,
-        HighlightKind::Number => theme.number,
-        HighlightKind::Keyword => theme.keyword,
-        HighlightKind::Type => theme.type_name,
-        HighlightKind::Function => theme.function,
-        HighlightKind::Property => theme.property,
-        HighlightKind::Constant => theme.constant,
-        HighlightKind::Operator => theme.operator,
-        HighlightKind::Variable => theme.fg,
-    }
 }
 
 #[cfg(test)]

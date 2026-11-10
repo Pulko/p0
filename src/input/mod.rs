@@ -39,6 +39,10 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             commands::dismiss_overlay(app);
             return;
         }
+        if app.markdown_preview.is_some() {
+            app.markdown_preview = None;
+            return;
+        }
     }
 
     if ctrl {
@@ -51,6 +55,10 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('p') | KeyCode::Char('P') => return commands::open_search(app),
             KeyCode::Char('d') | KeyCode::Char('D') if shift => {
                 app.toggle_diff();
+                return;
+            }
+            KeyCode::Char('m') | KeyCode::Char('M') if shift => {
+                app.toggle_markdown_preview();
                 return;
             }
             KeyCode::Char('f') | KeyCode::Char('F') => return commands::open_search_file(app),
@@ -304,6 +312,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
             if let Some(Some(action)) = status_hit {
                 match action {
                     crate::app::state::StatusAction::Diff => app.toggle_diff(),
+                    crate::app::state::StatusAction::Markdown => app.toggle_markdown_preview(),
                     crate::app::state::StatusAction::Theme => commands::open_themes(app),
                     crate::app::state::StatusAction::Help => commands::open_help(app),
                     crate::app::state::StatusAction::Types => commands::click_types_status(app),

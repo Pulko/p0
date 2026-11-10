@@ -3,6 +3,7 @@ mod app;
 mod editor;
 mod input;
 mod language;
+mod markdown;
 mod syntax;
 mod ui;
 mod workspace;

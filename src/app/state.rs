@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::agent::{AgentRun, Thread};
-use crate::editor::{Clipboard, Document, DocumentChange, DocumentId, EditorView, Position, Range};
+use crate::editor::{
+    Clipboard, Document, DocumentChange, DocumentId, EditorView, LanguageId, Position, Range,
+};
 use crate::language::{
     CompletionItem, Diagnostic, LanguageClient, Location, LspCmd, LspStatus, TextEdit,
 };
@@ -156,6 +158,7 @@ pub enum StatusAction {
     Help,
     Agent,
     Types,
+    Markdown,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -264,6 +267,7 @@ pub struct App {
     git_status_again: bool,
     git_status_at: Option<Instant>,
     pub diff_view: Option<DiffView>,
+    pub markdown_preview: Option<crate::markdown::Preview>,
     pub gutter_width: u16,
     pub menu_area: Option<(u16, u16, u16, u16)>,
     pub menu_rows: Vec<(usize, u16)>,
@@ -344,6 +348,7 @@ impl App {
             git_status_again: false,
             git_status_at: None,
             diff_view: None,
+            markdown_preview: None,
             gutter_width: 4,
             menu_area: None,
             menu_rows: Vec::new(),
@@ -565,6 +570,13 @@ impl App {
         {
             self.diff_view = None;
         }
+        if self
+            .markdown_preview
+            .as_ref()
+            .is_some_and(|preview| preview.document_id == id)
+        {
+            self.markdown_preview = None;
+        }
     }
 
     pub fn close_document(&mut self, id: DocumentId, force: bool) {
@@ -633,6 +645,7 @@ impl App {
         };
         let document_id = doc.id;
         let current = doc.text();
+        self.markdown_preview = None;
         self.diff_view = Some(DiffView {
             document_id,
             lines: Vec::new(),
@@ -647,6 +660,63 @@ impl App {
             current,
             self.diff_tx.clone(),
         );
+    }
+
+    pub fn markdown_preview_open(&self) -> bool {
+        self.markdown_preview
+            .as_ref()
+            .is_some_and(|preview| self.active == Some(preview.document_id))
+    }
+
+    pub fn toggle_markdown_preview(&mut self) {
+        let Some(id) = self.active else {
+            return;
+        };
+        if self.markdown_preview_open() {
+            self.markdown_preview = None;
+            return;
+        }
+        let Some(doc) = self.documents.get(&id) else {
+            return;
+        };
+        if doc.language != LanguageId::Markdown {
+            self.message = Some("Markdown preview is for Markdown files".into());
+            return;
+        }
+        self.diff_view = None;
+        self.markdown_preview = Some(crate::markdown::Preview::open(id));
+    }
+
+    pub fn scroll_markdown_preview(&mut self, delta: i32) {
+        let Some(active) = self.active else {
+            return;
+        };
+        let Some(preview) = self.markdown_preview.as_mut() else {
+            return;
+        };
+        if preview.document_id != active {
+            return;
+        }
+        let max = preview.line_count().saturating_sub(1) as i64;
+        let next = preview.scroll as i64 + i64::from(delta);
+        preview.scroll = next.clamp(0, max) as usize;
+    }
+
+    pub fn jump_markdown_preview(&mut self, to_end: bool) {
+        let Some(active) = self.active else {
+            return;
+        };
+        let Some(preview) = self.markdown_preview.as_mut() else {
+            return;
+        };
+        if preview.document_id != active {
+            return;
+        }
+        preview.scroll = if to_end {
+            preview.line_count().saturating_sub(1)
+        } else {
+            0
+        };
     }
 
     pub fn request_inline_diff(&mut self, document_id: DocumentId) {

@@ -23,6 +23,7 @@ pub enum LanguageId {
     Toml,
     Html,
     Css,
+    Markdown,
     PlainText,
 }
 
@@ -43,6 +44,7 @@ impl LanguageId {
             "toml" => Self::Toml,
             "html" | "htm" => Self::Html,
             "css" => Self::Css,
+            "md" | "markdown" => Self::Markdown,
             _ => Self::PlainText,
         }
     }
@@ -57,6 +59,7 @@ impl LanguageId {
             Self::Toml => "TOML",
             Self::Html => "HTML",
             Self::Css => "CSS",
+            Self::Markdown => "Markdown",
             Self::PlainText => "Plain Text",
         }
     }
@@ -71,6 +74,7 @@ impl LanguageId {
             Self::Toml => "toml",
             Self::Html => "html",
             Self::Css => "css",
+            Self::Markdown => "markdown",
             Self::PlainText => "plaintext",
         }
     }
@@ -539,6 +543,19 @@ mod tests {
             let id = N.fetch_add(1, Ordering::Relaxed);
             std::env::temp_dir().join(format!("p0-test-{id}-{name}"))
         }
+    }
+
+    #[test]
+    fn markdown_paths_use_the_markdown_language() {
+        assert_eq!(
+            LanguageId::from_path(Path::new("README.md")),
+            LanguageId::Markdown
+        );
+        assert_eq!(
+            LanguageId::from_path(Path::new("notes.markdown")),
+            LanguageId::Markdown
+        );
+        assert_eq!(LanguageId::Markdown.as_str(), "Markdown");
     }
 
     #[test]
