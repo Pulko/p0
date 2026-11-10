@@ -13,6 +13,10 @@ pub struct Config {
     pub explorer_visible: bool,
     #[serde(default = "default_theme")]
     pub theme: String,
+    #[serde(default)]
+    pub claude_enabled: bool,
+    #[serde(default)]
+    pub types_note_dismissed: bool,
 }
 
 impl Default for Config {
@@ -22,12 +26,16 @@ impl Default for Config {
             tab_width: default_tab_width(),
             explorer_visible: true,
             theme: default_theme(),
+            claude_enabled: false,
+            types_note_dismissed: false,
         }
     }
 }
 
+pub const EXPLORER_MIN_WIDTH: u16 = 28;
+
 fn default_explorer_width() -> u16 {
-    28
+    EXPLORER_MIN_WIDTH
 }
 fn default_tab_width() -> usize {
     4
@@ -41,11 +49,15 @@ fn default_theme() -> String {
 
 impl Config {
     pub fn load() -> Self {
-        let path = config_path();
-        let Ok(text) = fs::read_to_string(path) else {
-            return Self::default();
-        };
-        toml::from_str(&text).unwrap_or_default()
+        match fs::read_to_string(config_path()) {
+            Ok(text) => toml::from_str(&text).unwrap_or_default(),
+            Err(_) => {
+                let Ok(text) = fs::read_to_string(legacy_config_path()) else {
+                    return Self::default();
+                };
+                toml::from_str(&text).unwrap_or_default()
+            }
+        }
     }
 
     pub fn save(&self) -> std::io::Result<()> {
@@ -59,15 +71,32 @@ impl Config {
 }
 
 pub fn config_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("p0")
-        .join("config.toml")
+    app_dir("r3vu").join("config.toml")
+}
+
+fn legacy_config_path() -> PathBuf {
+    app_dir("p0").join("config.toml")
 }
 
 pub fn log_path() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("p0")
-        .join("p0.log")
+        .join("r3vu")
+        .join("r3vu.log")
+}
+
+fn app_dir(name: &str) -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn claude_is_off_by_default() {
+        assert!(!Config::default().claude_enabled);
+    }
 }

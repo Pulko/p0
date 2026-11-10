@@ -13,7 +13,11 @@ pub fn handle_event(app: &mut App, event: Event) {
         Event::Key(key) if key.kind != KeyEventKind::Release => handle_key(app, key),
         Event::Mouse(mouse) => handle_mouse(app, mouse),
         Event::Paste(text) => {
-            if events::editor_has_focus(app) {
+            if app.focus == Focus::Thread && matches!(app.overlay, Overlay::None) {
+                app.thread
+                    .compose
+                    .push_str(&text.replace(['\n', '\r'], " "));
+            } else if events::editor_has_focus(app) {
                 commands::type_text(app, &text);
             }
         }
@@ -28,6 +32,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
 
     if matches!(key.code, KeyCode::Esc) {
         if !matches!(app.overlay, Overlay::None) {
@@ -71,15 +76,25 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         }
     }
 
-    if !matches!(
+    let modal = !matches!(
         app.overlay,
         Overlay::None
             | Overlay::Completion { .. }
             | Overlay::Hover { .. }
             | Overlay::Signature { .. }
-    ) {
+    );
+    if alt && !modal {
+        match key.code {
+            KeyCode::Char('t') | KeyCode::Char('T') => return commands::start_thread(app),
+            KeyCode::Char('e') | KeyCode::Char('E') => return commands::prompt_agent_edit(app),
+            _ => {}
+        }
+    }
+
+    if modal {
         match key.code {
             KeyCode::Enter => return commands::overlay_submit(app),
+            KeyCode::Up | KeyCode::Down if matches!(app.overlay, Overlay::TypesNote) => return,
             KeyCode::Backspace => {
                 commands::backspace(app);
                 return;
@@ -103,6 +118,27 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             }
             _ => {}
         }
+    }
+
+    if app.focus == Focus::Thread && matches!(app.overlay, Overlay::None) {
+        match key.code {
+            KeyCode::Esc => {
+                if app.thread.compose.is_empty() {
+                    app.focus = Focus::Editor;
+                } else {
+                    app.thread.compose.clear();
+                }
+            }
+            KeyCode::Enter => commands::send_thread(app),
+            KeyCode::Backspace => {
+                app.thread.compose.pop();
+            }
+            KeyCode::Up => commands::scroll_thread(app, -1),
+            KeyCode::Down => commands::scroll_thread(app, 1),
+            KeyCode::Char(ch) => app.thread.compose.push(ch),
+            _ => {}
+        }
+        return;
     }
 
     if app.focus == Focus::Explorer && matches!(app.overlay, Overlay::None) {
@@ -187,6 +223,11 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
         && x < app.editor_area.0 + app.editor_area.2
         && y >= app.editor_area.1
         && y < app.editor_area.1 + app.editor_area.3;
+    let in_thread = app.thread_visible
+        && x >= app.thread_area.0
+        && x < app.thread_area.0 + app.thread_area.2
+        && y >= app.thread_area.1
+        && y < app.thread_area.1 + app.thread_area.3;
     let in_tabs = x >= app.tabs_area.0
         && x < app.tabs_area.0 + app.tabs_area.2
         && y >= app.tabs_area.1
@@ -208,9 +249,13 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
         }
         MouseEventKind::Down(MouseButton::Left) => {
             commands::cancel_hover(app);
-            if matches!(app.overlay, Overlay::Themes { .. } | Overlay::Help) {
+            if matches!(
+                app.overlay,
+                Overlay::Themes { .. } | Overlay::Help | Overlay::TypesNote
+            ) {
                 let was_themes = matches!(app.overlay, Overlay::Themes { .. });
                 let was_help = matches!(app.overlay, Overlay::Help);
+                let was_note = matches!(app.overlay, Overlay::TypesNote);
                 let inside = app.overlay_area.is_some_and(|(ax, ay, width, height)| {
                     x >= ax
                         && x < ax.saturating_add(width)
@@ -220,13 +265,18 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                 if inside {
                     if was_themes {
                         commands::click_themes(app, y);
+                    } else if was_help {
+                        commands::click_help(app, y);
+                    } else if was_note {
+                        commands::click_types_note(app, x, y);
                     }
                     return;
                 }
                 commands::dismiss_overlay(app);
                 if let Some(Some(action)) = status_hit {
                     let same = (was_themes && action == crate::app::state::StatusAction::Theme)
-                        || (was_help && action == crate::app::state::StatusAction::Help);
+                        || (was_help && action == crate::app::state::StatusAction::Help)
+                        || (was_note && action == crate::app::state::StatusAction::Types);
                     if same {
                         return;
                     }
@@ -248,12 +298,34 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                 return;
             }
             let dbl = events::note_click(app, x, y);
+            if commands::begin_explorer_resize(app, x, y) {
+                return;
+            }
             if let Some(Some(action)) = status_hit {
                 match action {
                     crate::app::state::StatusAction::Diff => app.toggle_diff(),
                     crate::app::state::StatusAction::Theme => commands::open_themes(app),
                     crate::app::state::StatusAction::Help => commands::open_help(app),
+                    crate::app::state::StatusAction::Types => commands::click_types_status(app),
+                    crate::app::state::StatusAction::Agent => {
+                        if commands::claude_ready(app) {
+                            if app.thread.running {
+                                commands::stop_agent(app);
+                            } else {
+                                app.thread_visible = !app.thread_visible;
+                                if app.thread_visible {
+                                    app.focus = Focus::Thread;
+                                } else if app.focus == Focus::Thread {
+                                    app.focus = Focus::Editor;
+                                }
+                            }
+                        }
+                    }
                 }
+            } else if app.pane_mark.is_some_and(|(hit_x, hit_y, width)| {
+                y == hit_y && x >= hit_x && x < hit_x.saturating_add(width)
+            }) {
+                app.explorer_visible = !app.explorer_visible;
             } else if in_tabs && !scroll_tabs(app, x) {
                 if let Some(tab) = app
                     .tab_hit_boxes
@@ -285,6 +357,17 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
             } else if in_explorer {
                 app.focus = Focus::Explorer;
                 commands::click_explorer(app, y);
+            } else if in_thread {
+                if let Some((hit_x, hit_y, width)) = app.thread_stop
+                    && y == hit_y
+                    && x >= hit_x
+                    && x < hit_x.saturating_add(width)
+                {
+                    commands::stop_agent(app);
+                } else {
+                    app.focus = Focus::Thread;
+                    app.overlay = Overlay::None;
+                }
             } else if in_editor {
                 app.focus = Focus::Editor;
                 if !commands::begin_hscroll_drag(app, x, y) {
@@ -300,6 +383,9 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                 }
             }
         }
+        MouseEventKind::Drag(MouseButton::Left) if app.explorer_resizing => {
+            commands::drag_explorer_resize(app, x);
+        }
         MouseEventKind::Drag(MouseButton::Left) if app.hscroll_dragging => {
             commands::drag_hscroll(app, x);
         }
@@ -307,6 +393,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
             commands::click_editor(app, x, y, true);
         }
         MouseEventKind::Up(MouseButton::Left) => {
+            commands::end_explorer_resize(app);
             app.dragging = false;
             app.hscroll_dragging = false;
         }
@@ -357,6 +444,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                 y,
                 in_explorer,
                 in_editor,
+                in_thread,
                 WheelAxis::Vertical(3),
             );
         }
@@ -368,6 +456,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                 y,
                 in_explorer,
                 in_editor,
+                in_thread,
                 WheelAxis::Vertical(-3),
             );
         }
@@ -379,6 +468,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                 y,
                 in_explorer,
                 in_editor,
+                in_thread,
                 WheelAxis::Horizontal(-4),
             );
         }
@@ -390,6 +480,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                 y,
                 in_explorer,
                 in_editor,
+                in_thread,
                 WheelAxis::Horizontal(4),
             );
         }
@@ -404,15 +495,17 @@ fn dispatch_wheel(
     y: u16,
     in_explorer: bool,
     in_editor: bool,
+    in_thread: bool,
     axis: WheelAxis,
 ) {
     commands::cancel_hover(app);
     let in_popup = in_rect(app.overlay_area, x, y) || in_rect(app.menu_area, x, y);
     let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
-    match commands::wheel_action(in_popup, in_explorer, in_editor, shift, axis) {
+    match commands::wheel_action(in_popup, in_explorer, in_editor, in_thread, shift, axis) {
         WheelAction::Explorer(delta) => commands::scroll_explorer(app, delta),
         WheelAction::EditorVertical(delta) => commands::scroll_editor(app, delta),
         WheelAction::EditorHorizontal(delta) => commands::scroll_editor_horizontal(app, delta),
+        WheelAction::Thread(delta) => commands::scroll_thread(app, delta),
         WheelAction::None => {}
     }
 }

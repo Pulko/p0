@@ -196,6 +196,28 @@ impl Document {
         self.revision != self.saved_revision
     }
 
+    pub fn replace_from_disk(&mut self) -> io::Result<()> {
+        let path = self
+            .path
+            .clone()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "document has no path"))?;
+        let bytes = fs::read(&path)?;
+        let text = String::from_utf8(bytes).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("file is not valid UTF-8: {error}"),
+            )
+        })?;
+        self.rope = Rope::from_str(&text);
+        self.line_ending = LineEnding::detect(&text);
+        self.revision = self.revision.saturating_add(1);
+        self.saved_revision = self.revision;
+        self.mtime = fs::metadata(&path).and_then(|meta| meta.modified()).ok();
+        self.undo = UndoHistory::default();
+        self.last_group = None;
+        Ok(())
+    }
+
     pub fn text(&self) -> String {
         self.rope.to_string()
     }

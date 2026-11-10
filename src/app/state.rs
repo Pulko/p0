@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
+use crate::agent::{AgentRun, Thread};
 use crate::editor::{Clipboard, Document, DocumentChange, DocumentId, EditorView, Position, Range};
 use crate::language::{
     CompletionItem, Diagnostic, LanguageClient, Location, LspCmd, LspStatus, TextEdit,
@@ -22,6 +23,7 @@ use super::config::Config;
 pub enum Focus {
     Editor,
     Explorer,
+    Thread,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +32,7 @@ pub enum PromptKind {
     RenameFile,
     RenameSymbol,
     SaveAs,
+    AgentEdit,
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +67,7 @@ pub enum MenuAction {
     DeletePath,
     CloseOthers(DocumentId),
     CloseAll,
+    AskClaude,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,6 +146,7 @@ pub enum Overlay {
         selected: usize,
     },
     Help,
+    TypesNote,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,6 +154,8 @@ pub enum StatusAction {
     Diff,
     Theme,
     Help,
+    Agent,
+    Types,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -235,10 +242,13 @@ pub struct App {
     pub tab_revealed: Option<DocumentId>,
     pub tab_scroll_left: Option<(u16, u16)>,
     pub tab_scroll_right: Option<(u16, u16)>,
+    pub pane_mark: Option<(u16, u16, u16)>,
+    pub types_copy: Option<(u16, u16, u16)>,
     pub last_click: Option<(Instant, u16, u16)>,
     pub dragging: bool,
     pub hscroll_hit: Option<HScrollHit>,
     pub hscroll_dragging: bool,
+    pub explorer_resizing: bool,
     pub hscroll_grab: u16,
     pub lsp_token: u64,
     pub completion_token: u64,
@@ -260,6 +270,14 @@ pub struct App {
     pub inline_changes: HashMap<DocumentId, LineChanges>,
     pub diff_baselines: HashMap<DocumentId, DiffBaseline>,
     pub open_hunks: HashSet<(DocumentId, usize)>,
+    pub thread: Thread,
+    pub thread_visible: bool,
+    pub thread_area: (u16, u16, u16, u16),
+    pub thread_stop: Option<(u16, u16, u16)>,
+    pub claude_installed: bool,
+    pub agent_tx: mpsc::UnboundedSender<crate::agent::AgentEvent>,
+    pub agent_run: Option<AgentRun>,
+    pub git_branch: Option<String>,
 }
 
 impl App {
@@ -273,6 +291,8 @@ impl App {
         drop(git_status_rx);
         let (diff_tx, diff_rx) = mpsc::unbounded_channel();
         drop(diff_rx);
+        let (agent_tx, agent_rx) = mpsc::unbounded_channel();
+        drop(agent_rx);
         let mut app = Self {
             explorer_visible: config.explorer_visible,
             explorer_entries: Vec::new(),
@@ -302,10 +322,13 @@ impl App {
             tab_revealed: None,
             tab_scroll_left: None,
             tab_scroll_right: None,
+            pane_mark: None,
+            types_copy: None,
             last_click: None,
             dragging: false,
             hscroll_hit: None,
             hscroll_dragging: false,
+            explorer_resizing: false,
             hscroll_grab: 0,
             lsp_token: 0,
             completion_token: 0,
@@ -327,6 +350,14 @@ impl App {
             inline_changes: HashMap::new(),
             diff_baselines: HashMap::new(),
             open_hunks: HashSet::new(),
+            thread: Thread::new(),
+            thread_visible: false,
+            thread_area: (0, 0, 0, 0),
+            thread_stop: None,
+            claude_installed: which::which("claude").is_ok(),
+            agent_tx,
+            agent_run: None,
+            git_branch: None,
             documents: HashMap::new(),
             views: HashMap::new(),
             order: Vec::new(),
@@ -387,10 +418,11 @@ impl App {
 
     pub fn receive_git_status(&mut self, result: crate::workspace::GitStatusUpdate) {
         self.git_status_running = false;
-        if let Ok(statuses) = result
-            && self.git_status != statuses
-        {
-            self.git_status = statuses;
+        if let Ok(snapshot) = result {
+            if self.git_status != snapshot.files {
+                self.git_status = snapshot.files;
+            }
+            self.git_branch = snapshot.branch;
         }
         if self.git_status_again {
             self.git_status_again = false;

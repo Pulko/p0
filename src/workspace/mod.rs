@@ -23,7 +23,12 @@ pub enum GitFileStatus {
     Untracked,
 }
 
-pub type GitStatusUpdate = Result<HashMap<PathBuf, GitFileStatus>, ()>;
+pub struct GitSnapshot {
+    pub files: HashMap<PathBuf, GitFileStatus>,
+    pub branch: Option<String>,
+}
+
+pub type GitStatusUpdate = Result<GitSnapshot, ()>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WatchKind {
@@ -311,7 +316,10 @@ pub fn spawn_git_status(root: PathBuf, tx: mpsc::UnboundedSender<GitStatusUpdate
             .output()
             .await;
         let update = match output {
-            Ok(output) if output.status.success() => Ok(parse_git_status(&root, &output.stdout)),
+            Ok(output) if output.status.success() => Ok(GitSnapshot {
+                files: parse_git_status(&root, &output.stdout),
+                branch: git_branch(&root).await,
+            }),
             Ok(output) => {
                 tracing::warn!("git status exited {}", output.status);
                 Err(())
@@ -323,6 +331,21 @@ pub fn spawn_git_status(root: PathBuf, tx: mpsc::UnboundedSender<GitStatusUpdate
         };
         let _ = tx.send(update);
     });
+}
+
+async fn git_branch(root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if name.is_empty() { None } else { Some(name) }
 }
 
 pub fn classify_watch_kind(kind: EventKind) -> Option<WatchKind> {

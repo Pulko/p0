@@ -1293,42 +1293,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "p0-ide"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "arboard",
- "crossterm",
- "dirs",
- "futures",
- "ignore",
- "notify",
- "nucleo",
- "ratatui",
- "ropey",
- "serde",
- "serde_json",
- "similar",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-subscriber",
- "tree-sitter",
- "tree-sitter-css",
- "tree-sitter-html",
- "tree-sitter-javascript",
- "tree-sitter-json",
- "tree-sitter-typescript",
- "tree-sitter-yaml",
- "unicode-segmentation",
- "unicode-width",
- "uuid",
- "which",
-]
-
-[[package]]
 name = "palette"
 version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1577,6 +1541,43 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "r3vu"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "crossterm",
+ "dirs",
+ "futures",
+ "ignore",
+ "libc",
+ "notify",
+ "nucleo",
+ "ratatui",
+ "ropey",
+ "serde",
+ "serde_json",
+ "similar",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "tree-sitter",
+ "tree-sitter-css",
+ "tree-sitter-html",
+ "tree-sitter-javascript",
+ "tree-sitter-json",
+ "tree-sitter-typescript",
+ "tree-sitter-yaml",
+ "unicode-segmentation",
+ "unicode-width",
+ "uuid",
+ "which",
+]
 
 [[package]]
 name = "rand"

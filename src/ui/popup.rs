@@ -5,12 +5,17 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
 use crate::app::App;
+use crate::app::commands::TYPES_INSTALL;
 use crate::app::state::Overlay;
 use crate::ui::theme::Theme;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let theme = app.theme();
-    if !matches!(app.overlay, Overlay::Themes { .. } | Overlay::Help) {
+    app.types_copy = None;
+    if !matches!(
+        app.overlay,
+        Overlay::Themes { .. } | Overlay::Help | Overlay::TypesNote
+    ) {
         app.overlay_area = None;
         app.overlay_rows.clear();
     }
@@ -32,6 +37,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
     if matches!(app.overlay, Overlay::Help) {
         render_help(frame, app, theme);
+        return;
+    }
+    if matches!(app.overlay, Overlay::TypesNote) {
+        render_types_note(frame, app, theme);
         return;
     }
     match &app.overlay {
@@ -91,7 +100,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             frame.render_widget(
                 Paragraph::new(info)
                     .style(theme.text())
-                    .block(theme.panel(" Find ")),
+                    .block(theme.panel(" Find ", false)),
                 area,
             );
         }
@@ -143,7 +152,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 Paragraph::new(lines)
                     .style(theme.text())
                     .wrap(Wrap { trim: false })
-                    .block(theme.panel(&heading)),
+                    .block(theme.panel(&heading, false)),
                 area,
             );
         }
@@ -154,7 +163,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 Paragraph::new(text.as_str())
                     .style(theme.text())
                     .wrap(Wrap { trim: false })
-                    .block(theme.panel(" Info ")),
+                    .block(theme.panel(" Info ", false)),
                 area,
             );
         }
@@ -185,7 +194,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             frame.render_widget(
                 Paragraph::new(format!("{message}\n\nEnter = confirm   Esc = cancel"))
                     .style(theme.text())
-                    .block(theme.panel(" Confirm ")),
+                    .block(theme.panel(" Confirm ", false)),
                 area,
             );
         }
@@ -196,11 +205,15 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             frame.render_widget(
                 Paragraph::new(format!(" {input} "))
                     .style(theme.text())
-                    .block(theme.panel(&prompt_title)),
+                    .block(theme.panel(&prompt_title, false)),
                 area,
             );
         }
-        Overlay::Themes { .. } | Overlay::Help | Overlay::ContextMenu { .. } | Overlay::None => {}
+        Overlay::Themes { .. }
+        | Overlay::Help
+        | Overlay::TypesNote
+        | Overlay::ContextMenu { .. }
+        | Overlay::None => {}
     }
 }
 
@@ -255,37 +268,176 @@ fn render_themes(
     frame.render_widget(
         List::new(items)
             .style(theme.text())
-            .block(theme.panel(" Theme ")),
+            .block(theme.panel(" Theme ", false)),
         area,
     );
 }
 
-fn render_help(frame: &mut Frame, app: &mut App, theme: crate::ui::theme::Theme) {
-    let rows = shortcut_rows();
-    let width = 42u16.min(frame.area().width.saturating_sub(2)).max(24);
-    let height = (rows.len() as u16 + 2)
+fn render_types_note(frame: &mut Frame, app: &mut App, theme: Theme) {
+    let width = 62u16.min(frame.area().width.saturating_sub(2)).max(24);
+    let copy = " Copy ";
+    let lines = vec![
+        Line::from(Span::styled(
+            " Editing works without it.",
+            Style::default().fg(theme.fg),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            " Types, completion, and go to definition need",
+            Style::default().fg(theme.fg),
+        )),
+        Line::from(Span::styled(
+            " typescript-language-server on PATH.",
+            Style::default().fg(theme.fg),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!(" {TYPES_INSTALL}"),
+            Style::default().fg(theme.accent),
+        )),
+        Line::from(Span::styled(
+            copy,
+            Style::default()
+                .fg(theme.on_accent)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            " Click ⊘ types off to check again, or restart r3vu.",
+            Style::default().fg(theme.fg_muted),
+        )),
+        Line::from(Span::styled(
+            " Enter dismisses this note.",
+            Style::default().fg(theme.fg_muted),
+        )),
+    ];
+    let copy_row = 6u16;
+    let height = (lines.len() as u16 + 2)
         .min(frame.area().height.saturating_sub(2))
         .max(3);
     let area = center(frame.area(), height, width);
     app.overlay_area = Some((area.x, area.y, area.width, area.height));
     app.overlay_rows.clear();
+    let copy_y = area.y.saturating_add(1).saturating_add(copy_row);
+    if copy_y < area.bottom().saturating_sub(1) {
+        app.types_copy = Some((area.x.saturating_add(1), copy_y, copy.len() as u16));
+    }
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(theme.text())
+            .wrap(Wrap { trim: false })
+            .block(theme.panel(" Types ", false)),
+        area,
+    );
+}
+
+fn render_help(frame: &mut Frame, app: &mut App, theme: crate::ui::theme::Theme) {
+    let shortcuts = shortcut_rows().len();
+    let width = 52u16.min(frame.area().width.saturating_sub(2)).max(24);
+    let height = (shortcuts as u16 + 6)
+        .min(frame.area().height.saturating_sub(2))
+        .max(3);
+    let area = center(frame.area(), height, width);
+    app.overlay_area = Some((area.x, area.y, area.width, area.height));
+    let inner = area.height.saturating_sub(2) as usize;
+    let rows = visible_help_rows(inner);
+    app.overlay_rows = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| match row {
+            HelpRow::Toggle => Some((0, area.y.saturating_add(1 + index as u16))),
+            _ => None,
+        })
+        .collect();
     frame.render_widget(Clear, area);
     let lines: Vec<Line> = rows
         .into_iter()
-        .take(height.saturating_sub(2) as usize)
-        .map(|(keys, action)| {
-            Line::from(vec![
+        .map(|row| match row {
+            HelpRow::Header(title) => Line::from(Span::styled(
+                format!(" {title}"),
+                Style::default()
+                    .fg(theme.fg_muted)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            HelpRow::Gap => Line::from(""),
+            HelpRow::Toggle => claude_toggle_line(app.config.claude_enabled, theme),
+            HelpRow::Shortcut(keys, action) => Line::from(vec![
                 Span::styled(format!(" {keys:<16}"), Style::default().fg(theme.accent)),
                 Span::styled(action, Style::default().fg(theme.fg)),
-            ])
+            ]),
         })
         .collect();
     frame.render_widget(
         Paragraph::new(lines)
             .style(theme.text())
-            .block(theme.panel(" Shortcuts ")),
+            .block(theme.panel(" Help ", false)),
         area,
     );
+}
+
+fn claude_toggle_line(enabled: bool, theme: Theme) -> Line<'static> {
+    let (state, hint, style) = if enabled {
+        (
+            "on ",
+            "click to turn off",
+            Style::default()
+                .fg(theme.on_accent)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        (
+            "off",
+            "click to turn on",
+            Style::default().fg(theme.fg_muted),
+        )
+    };
+    Line::from(vec![
+        Span::styled(
+            " Claude          ".to_string(),
+            Style::default().fg(theme.accent),
+        ),
+        Span::styled(format!("{state}  {hint}"), style),
+    ])
+}
+
+enum HelpRow {
+    Header(&'static str),
+    Gap,
+    Toggle,
+    Shortcut(&'static str, &'static str),
+}
+
+fn visible_help_rows(limit: usize) -> Vec<HelpRow> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut rows = Vec::new();
+    let mut left = limit;
+    if left > 1 {
+        rows.push(HelpRow::Header("Settings"));
+        left -= 1;
+    }
+    rows.push(HelpRow::Toggle);
+    left -= 1;
+    let shortcuts = shortcut_rows();
+    if left >= 2 {
+        if left >= shortcuts.len() + 2 {
+            rows.push(HelpRow::Gap);
+            left -= 1;
+        }
+        rows.push(HelpRow::Header("Help"));
+        left -= 1;
+    }
+    rows.extend(
+        shortcuts
+            .into_iter()
+            .take(left)
+            .map(|(keys, action)| HelpRow::Shortcut(keys, action)),
+    );
+    rows
 }
 
 pub(crate) fn shortcut_rows() -> Vec<(&'static str, &'static str)> {
@@ -296,11 +448,15 @@ pub(crate) fn shortcut_rows() -> Vec<(&'static str, &'static str)> {
         ("Click Search", "Search text in the repo"),
         ("Ctrl+F", "Search in file"),
         ("Ctrl+Enter", "Go to definition"),
+        ("Option+T", "Ask Claude about the selection"),
+        ("Option+E", "Edit the selection with Claude"),
+        ("Click Claude", "Show the pane, or stop a running turn"),
         ("Ctrl+R", "Rename symbol"),
         ("Ctrl+Z / Y", "Undo / redo"),
         ("Ctrl+Tab", "Next / previous tab"),
         ("Ctrl+Shift+D", "Git diff"),
         ("Click ↩", "Revert this change"),
+        ("Click ◧", "Show or hide the explorer"),
         ("Ctrl+B", "Toggle explorer"),
         ("Ctrl+W", "Close file"),
         ("Ctrl+N", "New file"),
@@ -399,7 +555,7 @@ fn render_completions(frame: &mut Frame, app: &App, selected: usize, theme: Them
     frame.render_widget(
         List::new(list_items)
             .style(theme.text())
-            .block(theme.panel(" Completions ")),
+            .block(theme.panel(" Completions ", false)),
         rect,
     );
 }
@@ -427,7 +583,7 @@ fn render_list(
                 .borders(Borders::ALL)
                 .inner(area),
         );
-    frame.render_widget(theme.panel(title), area);
+    frame.render_widget(theme.panel(title, false), area);
     let inner = Block::default().borders(Borders::ALL).inner(area);
     let rows = ratatui::layout::Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
@@ -490,6 +646,20 @@ fn bottom_box(area: Rect, height: u16, width: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn help_popup_opens_with_settings_then_shortcuts() {
+        let rows = visible_help_rows(100);
+        assert!(matches!(rows.first(), Some(HelpRow::Header("Settings"))));
+        assert!(matches!(rows.get(1), Some(HelpRow::Toggle)));
+        assert!(matches!(rows.get(2), Some(HelpRow::Gap)));
+        assert!(matches!(rows.get(3), Some(HelpRow::Header("Help"))));
+        assert!(matches!(
+            rows.get(4),
+            Some(HelpRow::Shortcut("Ctrl+/", "Show this list"))
+        ));
+        assert!(matches!(visible_help_rows(1).as_slice(), [HelpRow::Toggle]));
+    }
 
     #[test]
     fn splits_hover_signature_docs_and_tags() {

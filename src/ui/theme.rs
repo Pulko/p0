@@ -37,11 +37,13 @@ impl Theme {
         Style::default().bg(self.bg).fg(self.fg)
     }
 
-    pub fn panel<'a>(self, title: &'a str) -> Block<'a> {
+    pub fn panel<'a>(self, title: &'a str, focused: bool) -> Block<'a> {
+        let color = if focused { self.accent } else { self.border };
         Block::default()
             .title(title)
+            .title_style(Style::default().fg(if focused { self.accent } else { self.fg_muted }))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.border))
+            .border_style(Style::default().fg(color))
             .style(self.text())
     }
 }
