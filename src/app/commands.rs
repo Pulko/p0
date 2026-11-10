@@ -4,10 +4,10 @@ use ropey::Rope;
 
 use crate::agent::{AgentEvent, AgentRun, Anchor, LineKind, PromptStyle, TranscriptLine};
 use crate::editor::{
-    DocumentChange, DocumentId, EditorView, HScrollBar, Movement, Position, Range, Selection,
-    clamp_horizontal_left, delete_backward, delete_forward, hscroll_left_at, indent_for_newline,
-    insert_text, line_text, max_line_display_width, move_cursor, select_word_at, selected_text,
-    set_cursor, word_bounds,
+    DocumentChange, DocumentId, EditorView, HScrollBar, LineEnding, Movement, Position, Range,
+    Selection, clamp_horizontal_left, delete_backward, delete_forward, hscroll_left_at,
+    indent_for_newline, insert_text, line_text, max_line_display_width, move_cursor,
+    normalize_line_breaks, select_word_at, selected_text, set_cursor, word_bounds,
 };
 use crate::language::{
     CompletionItem, LspCmd, LspStatus, completion_prefix, filter_completions, strip_snippets,
@@ -24,6 +24,7 @@ use super::state::{
 pub fn save_active(app: &mut App) {
     let Some(id) = app.active else { return };
     let mut needs_save_as = false;
+    let before = app.documents.get(&id).map(|doc| doc.text());
     if let Some(doc) = app.documents.get_mut(&id) {
         if doc.path.is_none() {
             needs_save_as = true;
@@ -34,6 +35,9 @@ pub fn save_active(app: &mut App) {
             app.message = Some("saved".into());
         }
     }
+    if let Some(before) = before.filter(|_| !needs_save_as) {
+        sync_normalized_buffer(app, id, &before, true);
+    }
     if needs_save_as {
         app.overlay = Overlay::Prompt {
             title: "Save as (relative path)".into(),
@@ -43,6 +47,54 @@ pub fn save_active(app: &mut App) {
     } else {
         app.refresh_git_status();
     }
+}
+
+fn sync_normalized_buffer(app: &mut App, id: DocumentId, before: &str, notify_lsp: bool) {
+    let Some(doc) = app.documents.get(&id) else {
+        return;
+    };
+    if doc.text() == before {
+        return;
+    }
+    let language = doc.language;
+    let rope = doc.rope.clone();
+    let revision = doc.revision;
+    let path = doc.path.clone();
+    let text = doc.text();
+    app.syntax.open(id, language, &rope);
+    if !notify_lsp {
+        return;
+    }
+    let Some(path) = path else {
+        return;
+    };
+    let _ = app.lsp.tx.send(LspCmd::DidChange {
+        path,
+        version: revision as i64,
+        change: DocumentChange {
+            document_id: id,
+            revision,
+            start_byte: 0,
+            old_end_byte: 0,
+            new_end_byte: text.len(),
+            start_char: 0,
+            old_end_char: 0,
+            new_end_char: text.chars().count(),
+            start_position: Position::default(),
+            old_end_position: Position::default(),
+            new_end_position: Position::default(),
+            start_row: 0,
+            start_byte_column: 0,
+            old_end_row: 0,
+            old_end_byte_column: 0,
+            new_end_row: 0,
+            new_end_byte_column: 0,
+            inserted_text: text.clone(),
+            deleted_text: String::new(),
+        },
+        full_text: text,
+        incremental: false,
+    });
 }
 
 pub fn type_text(app: &mut App, text: &str) {
@@ -61,6 +113,12 @@ pub fn type_text(app: &mut App, text: &str) {
         return;
     }
     let Some(id) = app.active else { return };
+    let line_ending = app
+        .documents
+        .get(&id)
+        .map(|doc| doc.line_ending)
+        .unwrap_or(LineEnding::Lf);
+    let text = normalize_line_breaks(text, line_ending);
     let newline = text == "\n" || text == "\r\n";
     let extra = {
         let doc = app.documents.get(&id);
@@ -84,7 +142,7 @@ pub fn type_text(app: &mut App, text: &str) {
             extra
         )
     } else {
-        text.to_string()
+        text
     };
     let changes =
         if let (Some(doc), Some(view)) = (app.documents.get_mut(&id), app.views.get_mut(&id)) {
@@ -674,6 +732,7 @@ pub fn submit_prompt(app: &mut App) {
         PromptKind::SaveAs => {
             let path = app.root.join(input);
             let mut opened = None;
+            let before = app.active_doc().map(|doc| (doc.id, doc.text()));
             if let Some(doc) = app.active_doc_mut() {
                 doc.path = Some(path.clone());
                 doc.language = crate::editor::LanguageId::from_path(&path);
@@ -682,6 +741,9 @@ pub fn submit_prompt(app: &mut App) {
                 } else {
                     opened = Some((doc.language, doc.text(), doc.revision as i64));
                 }
+            }
+            if let Some((id, before)) = before {
+                sync_normalized_buffer(app, id, &before, false);
             }
             if let Some((language, text, version)) = opened {
                 let _ = app.lsp.tx.send(LspCmd::DidOpen {

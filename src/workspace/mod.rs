@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 use ropey::Rope;
 
-use crate::editor::{Position, Range, line_visible_chars};
+use crate::editor::{Position, Range, editor_content_lines, editor_lines, line_visible_chars};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GitFileStatus {
@@ -416,21 +416,54 @@ pub fn accept_watch_path(root: &Path, path: &Path, ignore: &mut ignore::Incremen
     !ignore.matched(&relative, path.is_dir()).is_ignore()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DirectoryStatus {
+    pub kind: GitFileStatus,
+    pub staged: bool,
+}
+
 pub fn directory_status(
     statuses: &HashMap<PathBuf, GitPathStatus>,
     dir: &Path,
-) -> Option<GitFileStatus> {
-    statuses
-        .iter()
-        .filter(|(path, _)| path.starts_with(dir))
-        .filter_map(|(_, status)| status.summary())
-        .min_by_key(|status| match status {
-            GitFileStatus::Modified => 0,
-            GitFileStatus::Added => 1,
-            GitFileStatus::Deleted => 2,
-            GitFileStatus::Renamed => 3,
-            GitFileStatus::Untracked => 4,
+) -> Option<DirectoryStatus> {
+    let mut unstaged = None;
+    let mut staged = None;
+    for (path, status) in statuses {
+        if !path.starts_with(dir) {
+            continue;
+        }
+        if let Some(kind) = status.unstaged {
+            unstaged = Some(prefer_status(unstaged, kind));
+        }
+        if let Some(kind) = status.staged {
+            staged = Some(prefer_status(staged, kind));
+        }
+    }
+    if let Some(kind) = unstaged {
+        Some(DirectoryStatus {
+            kind,
+            staged: false,
         })
+    } else {
+        staged.map(|kind| DirectoryStatus { kind, staged: true })
+    }
+}
+
+fn prefer_status(current: Option<GitFileStatus>, next: GitFileStatus) -> GitFileStatus {
+    match current {
+        Some(status) if status_rank(status) <= status_rank(next) => status,
+        _ => next,
+    }
+}
+
+fn status_rank(status: GitFileStatus) -> u8 {
+    match status {
+        GitFileStatus::Modified => 0,
+        GitFileStatus::Added => 1,
+        GitFileStatus::Deleted => 2,
+        GitFileStatus::Renamed => 3,
+        GitFileStatus::Untracked => 4,
+    }
 }
 
 pub fn watch_matcher(root: &Path) -> ignore::IncrementalIgnore {
@@ -721,7 +754,9 @@ pub fn parse_git_diff(text: &str) -> ParsedGitDiff {
     let mut preamble = Vec::new();
     let mut hunks = Vec::new();
     let mut current: Option<GitHunk> = None;
-    for line in text.lines() {
+    // Split on `\n` only. `str::lines()` also strips a trailing `\r`, and that
+    // byte is part of a CR or CRLF markdown line that `git apply` must match.
+    for line in git_diff_lines(text) {
         if line.starts_with("@@") {
             if let Some(hunk) = current.take() {
                 hunks.push(hunk);
@@ -758,6 +793,22 @@ pub fn hunk_patch(diff: &ParsedGitDiff, index: usize) -> Option<String> {
     Some(out)
 }
 
+/// Diff rows split on LF only. A CR before that LF stays on the row.
+fn git_diff_lines(text: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for (index, byte) in text.bytes().enumerate() {
+        if byte == b'\n' {
+            lines.push(&text[start..index]);
+            start = index + 1;
+        }
+    }
+    if start < text.len() {
+        lines.push(&text[start..]);
+    }
+    lines
+}
+
 pub fn lines_from_git_diff(diff: &ParsedGitDiff) -> Vec<DiffLine> {
     let mut lines = Vec::new();
     for line in &diff.preamble {
@@ -768,32 +819,103 @@ pub fn lines_from_git_diff(diff: &ParsedGitDiff) -> Vec<DiffLine> {
         });
     }
     for (index, hunk) in diff.hunks.iter().enumerate() {
+        let mut body = Vec::new();
+        for line in &hunk.lines {
+            body.extend(expand_diff_line(line));
+        }
+        let old_count = body
+            .iter()
+            .filter(|line| matches!(line.kind, DiffKind::Delete | DiffKind::Equal))
+            .count();
+        let new_count = body
+            .iter()
+            .filter(|line| matches!(line.kind, DiffKind::Insert | DiffKind::Equal))
+            .count();
         lines.push(DiffLine {
             kind: DiffKind::Header,
-            text: hunk.header.clone(),
+            text: displayed_hunk_header(&hunk.header, old_count, new_count),
             hunk: Some(index),
         });
-        for line in &hunk.lines {
-            let kind = if line.starts_with('+') {
-                DiffKind::Insert
-            } else if line.starts_with('-') {
-                DiffKind::Delete
-            } else if line.starts_with('\\') {
-                DiffKind::Header
-            } else {
-                DiffKind::Equal
-            };
-            lines.push(DiffLine {
-                kind,
-                text: line.clone(),
-                hunk: None,
-            });
-        }
+        lines.extend(body);
     }
     lines
 }
 
-pub fn untracked_diff_lines(text: &str) -> Vec<DiffLine> {
+fn expand_diff_line(line: &str) -> Vec<DiffLine> {
+    if line.starts_with('\\') {
+        return vec![DiffLine {
+            kind: DiffKind::Header,
+            text: line.to_string(),
+            hunk: None,
+        }];
+    }
+    let (kind, marker, content) = if let Some(content) = line.strip_prefix('+') {
+        (DiffKind::Insert, "+", content)
+    } else if let Some(content) = line.strip_prefix('-') {
+        (DiffKind::Delete, "-", content)
+    } else if let Some(content) = line.strip_prefix(' ') {
+        (DiffKind::Equal, " ", content)
+    } else {
+        return vec![DiffLine {
+            kind: DiffKind::Equal,
+            text: line.to_string(),
+            hunk: None,
+        }];
+    };
+    let mut parts = editor_content_lines(content);
+    // `+\r` is one empty CRLF row. Splitting treats that lone CR as a break
+    // and would otherwise drop the row.
+    if parts.is_empty() {
+        parts.push(String::new());
+    }
+    parts
+        .into_iter()
+        .map(|part| DiffLine {
+            kind,
+            text: format!("{marker}{part}"),
+            hunk: None,
+        })
+        .collect()
+}
+
+fn displayed_hunk_header(header: &str, old_count: usize, new_count: usize) -> String {
+    let Some((old_start, parsed_old, new_start, parsed_new, tail)) = parse_hunk_header(header)
+    else {
+        return header.to_string();
+    };
+    if parsed_old == old_count && parsed_new == new_count {
+        return header.to_string();
+    }
+    format!("@@ -{old_start},{old_count} +{new_start},{new_count} @@{tail}")
+}
+
+fn parse_hunk_header(header: &str) -> Option<(usize, usize, usize, usize, &str)> {
+    let rest = header.strip_prefix("@@")?.trim_start();
+    let mut tokens = rest.split_whitespace();
+    let old = tokens.next()?;
+    let new = tokens.next()?;
+    let (old_start, old_count) = parse_hunk_ref(old)?;
+    let (new_start, new_count) = parse_hunk_ref(new)?;
+    let tail_at = header[2..].find("@@")? + 2;
+    let tail = header.get(tail_at + 2..)?;
+    Some((old_start, old_count, new_start, new_count, tail))
+}
+
+fn parse_hunk_ref(token: &str) -> Option<(usize, usize)> {
+    let token = token.trim_start_matches(['-', '+']);
+    let mut parts = token.split(',');
+    let start = parts.next()?.parse().ok()?;
+    let count = match parts.next() {
+        Some(count) => count.parse().ok()?,
+        None => 1,
+    };
+    Some((start, count))
+}
+
+pub fn untracked_diff(relative: &str, text: &str) -> (Vec<DiffLine>, Option<ParsedGitDiff>) {
+    if let Some(parsed) = new_file_diff(relative, text) {
+        return (lines_from_git_diff(&parsed), Some(parsed));
+    }
     let mut lines = vec![
         DiffLine {
             kind: DiffKind::Header,
@@ -806,18 +928,49 @@ pub fn untracked_diff_lines(text: &str) -> Vec<DiffLine> {
             hunk: None,
         },
     ];
-    let body = text.strip_suffix('\n').unwrap_or(text);
-    if body.is_empty() {
-        return lines;
-    }
-    for line in body.split('\n') {
+    for line in editor_content_lines(text) {
         lines.push(DiffLine {
             kind: DiffKind::Insert,
             text: format!("+{line}"),
             hunk: None,
         });
     }
-    lines
+    (lines, None)
+}
+
+/// A new-file patch `git apply` can stage, unstage, and discard.
+/// Rows stay split on LF only so a trailing CR still matches the file.
+fn new_file_diff(relative: &str, text: &str) -> Option<ParsedGitDiff> {
+    if text.is_empty()
+        || relative.is_empty()
+        || relative.contains(['\n', '\r', '\0'])
+        || relative.starts_with('/')
+    {
+        return None;
+    }
+    let rows = git_diff_lines(text);
+    let count = rows.len();
+    if count == 0 {
+        return None;
+    }
+    let header = if count == 1 {
+        "@@ -0,0 +1 @@".to_string()
+    } else {
+        format!("@@ -0,0 +1,{count} @@")
+    };
+    let mut lines: Vec<String> = rows.into_iter().map(|line| format!("+{line}")).collect();
+    if !text.ends_with('\n') {
+        lines.push("\\ No newline at end of file".into());
+    }
+    Some(ParsedGitDiff {
+        preamble: vec![
+            format!("diff --git a/{relative} b/{relative}"),
+            "new file mode 100644".into(),
+            "--- /dev/null".into(),
+            format!("+++ b/{relative}"),
+        ],
+        hunks: vec![GitHunk { header, lines }],
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1023,7 +1176,9 @@ pub fn classify_lines(original: &str, current: &str) -> LineChanges {
 
     let old_lines = split_lines(original);
     let new_lines = split_lines(current);
-    let diff = TextDiff::from_slices(&old_lines, &new_lines);
+    let old_refs: Vec<&str> = old_lines.iter().map(String::as_str).collect();
+    let new_refs: Vec<&str> = new_lines.iter().map(String::as_str).collect();
+    let diff = TextDiff::from_slices(&old_refs, &new_refs);
     let mut marks = vec![LineMark::Unchanged; new_lines.len()];
     let mut deleted_before = vec![0; new_lines.len() + 1];
     let mut removed_before = vec![Vec::new(); new_lines.len() + 1];
@@ -1227,13 +1382,8 @@ pub fn buffer_line_at(rows: &[VisualRow], visual_index: usize) -> Option<usize> 
     }
 }
 
-fn split_lines(text: &str) -> Vec<&str> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    text.split('\n')
-        .map(|line| line.strip_suffix('\r').unwrap_or(line))
-        .collect()
+fn split_lines(text: &str) -> Vec<String> {
+    editor_lines(text)
 }
 
 const MAX_SEARCH_HITS: usize = 400;
@@ -1466,6 +1616,128 @@ index 111..222 100644
         assert!(patch.contains("-b\n"));
         assert!(patch.contains("+c\n"));
         assert!(patch.ends_with("+c\n"));
+    }
+
+    #[test]
+    fn shows_every_markdown_line_hidden_inside_a_git_line() {
+        let text = "\
+diff --git a/app/readme.md b/app/readme.md
+new file mode 100644
+--- /dev/null
++++ b/app/readme.md
+@@ -0,0 +1,1 @@
++# r3vu\rA mouse-driven terminal IDE\r```bash
+\\ No newline at end of file
+";
+        let parsed = parse_git_diff(text);
+        assert_eq!(parsed.hunks[0].header, "@@ -0,0 +1,1 @@");
+        let patch = hunk_patch(&parsed, 0).unwrap();
+        assert!(patch.contains("@@ -0,0 +1,1 @@"));
+        assert!(patch.contains("+# r3vu\rA mouse-driven terminal IDE\r```bash\n"));
+
+        let lines = lines_from_git_diff(&parsed);
+        let header = lines.iter().find(|line| line.hunk == Some(0)).unwrap();
+        assert_eq!(header.text, "@@ -0,0 +1,3 @@");
+        let inserts: Vec<_> = lines
+            .iter()
+            .filter(|line| line.kind == DiffKind::Insert)
+            .map(|line| line.text.as_str())
+            .collect();
+        assert_eq!(
+            inserts,
+            vec!["+# r3vu", "+A mouse-driven terminal IDE", "+```bash",]
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.text == "\\ No newline at end of file")
+        );
+
+        let crlf = ParsedGitDiff {
+            preamble: Vec::new(),
+            hunks: vec![GitHunk {
+                header: "@@ -0,0 +1 @@".into(),
+                lines: vec!["+keep\r".into()],
+            }],
+        };
+        let crlf_lines = lines_from_git_diff(&crlf);
+        let crlf_inserts: Vec<_> = crlf_lines
+            .iter()
+            .filter(|line| line.kind == DiffKind::Insert)
+            .map(|line| line.text.as_str())
+            .collect();
+        assert_eq!(crlf_inserts, vec!["+keep"]);
+        assert_eq!(
+            crlf_lines
+                .iter()
+                .find(|line| line.hunk == Some(0))
+                .unwrap()
+                .text,
+            "@@ -0,0 +1 @@"
+        );
+        assert!(hunk_patch(&crlf, 0).unwrap().contains("+keep\r\n"));
+
+        let cr = "\
+diff --git a/readme.md b/readme.md
+--- a/readme.md
++++ b/readme.md
+@@ -1 +1 @@
+-# r3vu\r\rA mouse.\r
+\\ No newline at end of file
++# r3vu
++
++A mouse.
+";
+        let parsed_cr = parse_git_diff(cr);
+        let cr_patch = hunk_patch(&parsed_cr, 0).unwrap();
+        assert!(
+            cr_patch.contains("-# r3vu\r\rA mouse.\r\n"),
+            "stage patch dropped a carriage return: {cr_patch:?}"
+        );
+        let blank = ParsedGitDiff {
+            preamble: Vec::new(),
+            hunks: vec![GitHunk {
+                header: "@@ -1,2 +1,2 @@".into(),
+                lines: vec![" keep\r".into(), "+\r".into()],
+            }],
+        };
+        let blank_rows: Vec<_> = lines_from_git_diff(&blank)
+            .into_iter()
+            .filter(|line| line.hunk.is_none() && line.kind != DiffKind::Header)
+            .map(|line| line.text)
+            .collect();
+        assert_eq!(blank_rows, vec![" keep", "+"]);
+
+        let (untracked, parsed_new) = untracked_diff(
+            "app/readme.md",
+            "# r3vu\rA mouse-driven terminal IDE\r```bash",
+        );
+        let untracked_inserts: Vec<_> = untracked
+            .iter()
+            .filter(|line| line.kind == DiffKind::Insert)
+            .map(|line| line.text.as_str())
+            .collect();
+        assert_eq!(untracked_inserts, inserts);
+        assert!(untracked.iter().any(|line| line.hunk == Some(0)));
+        let new_patch = hunk_patch(parsed_new.as_ref().unwrap(), 0).unwrap();
+        assert!(new_patch.contains("+++ b/app/readme.md\n"));
+        assert!(new_patch.contains("+# r3vu\rA mouse-driven terminal IDE\r```bash\n"));
+        assert!(new_patch.contains("\\ No newline at end of file\n"));
+
+        let (lf_lines, lf_parsed) = untracked_diff("app/readme.md", "# r3vu\n\nA mouse.\n");
+        assert!(lf_lines.iter().any(|line| line.hunk == Some(0)));
+        let lf_patch = hunk_patch(lf_parsed.as_ref().unwrap(), 0).unwrap();
+        assert!(lf_patch.contains("@@ -0,0 +1,3 @@\n+# r3vu\n+\n+A mouse.\n"));
+        assert!(!lf_patch.contains("No newline"));
+        let (empty_lines, empty_parsed) = untracked_diff("app/readme.md", "");
+        assert!(empty_parsed.is_none());
+        assert!(empty_lines.iter().all(|line| line.hunk.is_none()));
+
+        let marks = classify_lines("", "# r3vu\rA mouse-driven terminal IDE\r```bash");
+        assert_eq!(
+            marks.marks,
+            vec![LineMark::Added, LineMark::Added, LineMark::Added]
+        );
     }
 
     #[test]
@@ -1712,11 +1984,17 @@ index 111..222 100644
         );
         assert_eq!(
             directory_status(&statuses, &root.join("src")),
-            Some(GitFileStatus::Modified)
+            Some(DirectoryStatus {
+                kind: GitFileStatus::Modified,
+                staged: false,
+            })
         );
         assert_eq!(
             directory_status(&statuses, &root.join("src2")),
-            Some(GitFileStatus::Added)
+            Some(DirectoryStatus {
+                kind: GitFileStatus::Added,
+                staged: true,
+            })
         );
         assert_eq!(directory_status(&statuses, &root.join("empty")), None);
     }

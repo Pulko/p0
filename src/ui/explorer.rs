@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::App;
 use crate::app::state::{Focus, HeaderAction, HeaderHit, Overlay, SearchKind, SideTabHit};
 use crate::ui::theme::Theme;
-use crate::workspace::GitFileStatus;
+use crate::workspace::{DirectoryStatus, GitFileStatus};
 
 pub fn render_search(frame: &mut Frame, area: Rect, app: &mut App) {
     app.header_hits.clear();
@@ -150,9 +150,18 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         let git = if entry.is_dir {
             crate::workspace::directory_status(&app.git_status, &entry.path)
         } else {
-            app.git_status
-                .get(&entry.path)
-                .and_then(|status| status.summary())
+            app.git_status.get(&entry.path).and_then(|status| {
+                if let Some(kind) = status.unstaged {
+                    Some(crate::workspace::DirectoryStatus {
+                        kind,
+                        staged: false,
+                    })
+                } else {
+                    status
+                        .staged
+                        .map(|kind| crate::workspace::DirectoryStatus { kind, staged: true })
+                }
+            })
         };
         let status = status_color(dirty, git, theme);
         let mut style = Style::default().fg(status.unwrap_or(if entry.is_dir {
@@ -185,11 +194,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     );
 }
 
-fn status_mark(dirty: bool, git: Option<GitFileStatus>) -> &'static str {
+fn status_mark(dirty: bool, git: Option<DirectoryStatus>) -> &'static str {
     if dirty {
         return " ●";
     }
-    match git {
+    match git.map(|status| status.kind) {
         Some(GitFileStatus::Modified) => " M",
         Some(GitFileStatus::Added) => " A",
         Some(GitFileStatus::Deleted) => " D",
@@ -199,16 +208,21 @@ fn status_mark(dirty: bool, git: Option<GitFileStatus>) -> &'static str {
     }
 }
 
-fn status_color(dirty: bool, git: Option<GitFileStatus>, theme: Theme) -> Option<Color> {
+fn status_color(dirty: bool, git: Option<DirectoryStatus>, theme: Theme) -> Option<Color> {
     if dirty {
         return Some(theme.warning);
     }
-    match git {
-        Some(GitFileStatus::Modified | GitFileStatus::Renamed) => Some(theme.warning),
-        Some(GitFileStatus::Added) => Some(theme.added),
-        Some(GitFileStatus::Deleted) => Some(theme.deleted),
-        Some(GitFileStatus::Untracked) => Some(theme.fg_dim),
-        None => None,
+    git.map(|status| git_mark_color(status.kind, status.staged, theme))
+}
+
+pub(crate) fn git_mark_color(status: GitFileStatus, staged: bool, theme: Theme) -> Color {
+    if staged {
+        return theme.added;
+    }
+    match status {
+        GitFileStatus::Modified | GitFileStatus::Renamed => theme.warning,
+        GitFileStatus::Deleted => theme.deleted,
+        GitFileStatus::Added | GitFileStatus::Untracked => theme.untracked,
     }
 }
 
@@ -284,21 +298,60 @@ mod tests {
     fn changed_name_uses_the_mark_color() {
         let theme = super::super::theme::by_name("p0");
         assert_eq!(
-            status_color(false, Some(GitFileStatus::Modified), theme),
+            status_color(
+                false,
+                Some(DirectoryStatus {
+                    kind: GitFileStatus::Modified,
+                    staged: false,
+                }),
+                theme
+            ),
             Some(theme.warning)
+        );
+        assert_eq!(
+            status_color(
+                false,
+                Some(DirectoryStatus {
+                    kind: GitFileStatus::Modified,
+                    staged: true,
+                }),
+                theme
+            ),
+            Some(theme.added)
         );
         assert_eq!(status_color(true, None, theme), Some(theme.warning));
         assert_eq!(
-            status_color(false, Some(GitFileStatus::Added), theme),
+            status_color(
+                false,
+                Some(DirectoryStatus {
+                    kind: GitFileStatus::Added,
+                    staged: true,
+                }),
+                theme
+            ),
             Some(theme.added)
         );
         assert_eq!(
-            status_color(false, Some(GitFileStatus::Deleted), theme),
+            status_color(
+                false,
+                Some(DirectoryStatus {
+                    kind: GitFileStatus::Deleted,
+                    staged: false,
+                }),
+                theme
+            ),
             Some(theme.deleted)
         );
         assert_eq!(
-            status_color(false, Some(GitFileStatus::Untracked), theme),
-            Some(theme.fg_dim)
+            status_color(
+                false,
+                Some(DirectoryStatus {
+                    kind: GitFileStatus::Untracked,
+                    staged: false,
+                }),
+                theme
+            ),
+            Some(theme.untracked)
         );
         assert_eq!(status_color(false, None, theme), None);
     }

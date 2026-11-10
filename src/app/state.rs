@@ -822,13 +822,16 @@ impl App {
         self.file_diff_token = self.file_diff_token.saturating_add(1);
         if side == Some(GitFileStatus::Untracked) {
             let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let relative = crate::workspace::repo_relative(&self.root, &path).unwrap_or_default();
+            let (lines, parsed) = crate::workspace::untracked_diff(&relative, &text);
+            let allow_hunks = parsed.is_some();
             self.diff_view = Some(DiffView {
                 document_id,
                 path: Some(path),
                 source,
-                lines: crate::workspace::untracked_diff_lines(&text),
-                parsed: None,
-                allow_hunks: false,
+                lines,
+                parsed,
+                allow_hunks,
                 error: None,
                 scroll: 0,
                 loading: false,
@@ -882,7 +885,10 @@ impl App {
             return;
         };
         if doc.replace_from_disk().is_err() {
-            return;
+            if path.is_file() {
+                return;
+            }
+            doc.note_removed();
         }
         let language = doc.language;
         let rope = doc.rope.clone();
@@ -1607,6 +1613,42 @@ mod tests {
             assert_eq!(diff.source, DiffSource::Staged);
             assert_eq!(diff.path.as_deref(), Some(file.as_path()));
             let _ = std::fs::remove_file(file);
+        });
+    }
+
+    #[test]
+    fn a_new_markdown_file_offers_stage_and_discard() {
+        with_runtime(|| {
+            let root = std::env::temp_dir().join(format!("r3vu-new-md-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(root.join("app")).unwrap();
+            let path = root.join("app/readme.md");
+            std::fs::write(&path, "# r3vu\r\n\r\nA mouse.\r\n").unwrap();
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let mut app = App::new(root.clone(), LanguageClient { tx });
+            app.git_status.insert(
+                path.clone(),
+                GitPathStatus {
+                    staged: None,
+                    unstaged: Some(GitFileStatus::Untracked),
+                },
+            );
+            app.open_git_entry(path.clone(), false);
+            let diff = app.diff_view.as_ref().expect("new file diff");
+            assert!(diff.allow_hunks);
+            assert!(diff.lines.iter().any(|line| line.hunk == Some(0)));
+            let patch = crate::workspace::hunk_patch(diff.parsed.as_ref().unwrap(), 0).unwrap();
+            assert!(patch.contains("+# r3vu\r\n+\r\n+A mouse.\r\n"));
+            std::fs::remove_file(&path).unwrap();
+            app.reload_clean_document(&path);
+            let doc = app
+                .documents
+                .values()
+                .find(|doc| doc.path.as_deref() == Some(path.as_path()));
+            let doc = doc.expect("open buffer");
+            assert!(!doc.is_dirty());
+            assert!(doc.text().is_empty());
+            let _ = std::fs::remove_dir_all(&root);
         });
     }
 

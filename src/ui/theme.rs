@@ -28,6 +28,7 @@ pub struct Theme {
     pub added: Color,
     pub modified: Color,
     pub deleted: Color,
+    pub untracked: Color,
     pub warning: Color,
     pub search: Color,
     pub search_current: Color,
@@ -88,6 +89,7 @@ const P0: Theme = Theme {
     added: Color::Rgb(46, 160, 67),
     modified: Color::Rgb(56, 132, 214),
     deleted: Color::Rgb(214, 72, 72),
+    untracked: Color::Rgb(236, 148, 64),
     warning: Color::Rgb(220, 186, 80),
     search: Color::Rgb(92, 78, 28),
     search_current: Color::Rgb(220, 186, 80),
@@ -118,6 +120,7 @@ const LIGHT: Theme = Theme {
     added: Color::Rgb(20, 120, 50),
     modified: Color::Rgb(20, 80, 170),
     deleted: Color::Rgb(180, 30, 40),
+    untracked: Color::Rgb(176, 88, 16),
     warning: Color::Rgb(140, 90, 0),
     search: Color::Rgb(255, 230, 160),
     search_current: Color::Rgb(240, 190, 40),
@@ -148,6 +151,7 @@ const CONTRAST: Theme = Theme {
     added: Color::Rgb(0, 220, 80),
     modified: Color::Rgb(80, 160, 255),
     deleted: Color::Rgb(255, 70, 70),
+    untracked: Color::Rgb(255, 150, 40),
     warning: Color::Rgb(255, 220, 0),
     search: Color::Rgb(80, 70, 0),
     search_current: Color::Rgb(255, 220, 0),
@@ -178,6 +182,7 @@ const OCEAN: Theme = Theme {
     added: Color::Rgb(80, 190, 120),
     modified: Color::Rgb(90, 160, 230),
     deleted: Color::Rgb(230, 100, 100),
+    untracked: Color::Rgb(240, 150, 80),
     warning: Color::Rgb(230, 192, 100),
     search: Color::Rgb(70, 80, 30),
     search_current: Color::Rgb(230, 192, 100),
@@ -208,6 +213,7 @@ const EMBER: Theme = Theme {
     added: Color::Rgb(120, 180, 90),
     modified: Color::Rgb(120, 150, 210),
     deleted: Color::Rgb(210, 90, 70),
+    untracked: Color::Rgb(232, 132, 64),
     warning: Color::Rgb(224, 170, 80),
     search: Color::Rgb(90, 64, 28),
     search_current: Color::Rgb(224, 170, 80),
@@ -263,6 +269,9 @@ mod tests {
             let theme = by_name(name);
             assert_ne!(theme.comment, theme.bg, "{name}");
             assert_ne!(theme.folder, theme.fg_muted, "{name}");
+            assert_ne!(theme.untracked, theme.warning, "{name}");
+            assert_ne!(theme.untracked, theme.added, "{name}");
+            assert_ne!(theme.untracked, theme.fg_dim, "{name}");
         }
     }
 }

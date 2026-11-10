@@ -103,6 +103,68 @@ impl LineEnding {
     }
 }
 
+pub fn normalize_line_breaks(text: &str, ending: LineEnding) -> String {
+    let ending = ending.as_str();
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if take_line_break(ch, &mut chars) {
+            out.push_str(ending);
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+pub fn editor_lines(text: &str) -> Vec<String> {
+    split_editor_lines(text, true)
+}
+
+pub fn editor_content_lines(text: &str) -> Vec<String> {
+    split_editor_lines(text, false)
+}
+
+fn split_editor_lines(text: &str, keep_trailing_empty: bool) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut chars = text.chars().peekable();
+    let mut ended_on_break = false;
+    while let Some(ch) = chars.next() {
+        if take_line_break(ch, &mut chars) {
+            lines.push(std::mem::take(&mut current));
+            ended_on_break = true;
+        } else {
+            current.push(ch);
+            ended_on_break = false;
+        }
+    }
+    if !ended_on_break {
+        lines.push(current);
+    } else if keep_trailing_empty {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn take_line_break(ch: char, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> bool {
+    if ch == '\r' {
+        if chars.peek() == Some(&'\n') {
+            chars.next();
+        }
+        true
+    } else {
+        ch == '\n'
+            || matches!(
+                ch,
+                '\u{000B}' | '\u{000C}' | '\u{0085}' | '\u{2028}' | '\u{2029}'
+            )
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DocumentChange {
     pub document_id: DocumentId,
@@ -222,6 +284,16 @@ impl Document {
         Ok(())
     }
 
+    /// The file is gone. Leave an empty saved buffer so the discarded text is not still on screen.
+    pub fn note_removed(&mut self) {
+        self.rope = Rope::from_str("");
+        self.revision = self.revision.saturating_add(1);
+        self.saved_revision = self.revision;
+        self.mtime = None;
+        self.undo = UndoHistory::default();
+        self.last_group = None;
+    }
+
     pub fn text(&self) -> String {
         self.rope.to_string()
     }
@@ -252,17 +324,21 @@ impl Document {
             .parent()
             .map(|p| p.join(&tmp_name))
             .unwrap_or_else(|| PathBuf::from(&tmp_name));
+        let current = self.text();
+        let normalized = normalize_line_breaks(&current, self.line_ending);
         {
             let mut file = fs::File::create(&tmp_path)?;
-            for chunk in self.rope.chunks() {
-                file.write_all(chunk.as_bytes())?;
-            }
+            file.write_all(normalized.as_bytes())?;
             file.sync_all()?;
         }
         fs::rename(&tmp_path, path).or_else(|_| {
             fs::copy(&tmp_path, path)?;
             fs::remove_file(&tmp_path)
         })?;
+        if normalized != current {
+            self.rope = Rope::from_str(&normalized);
+            self.revision = self.revision.saturating_add(1);
+        }
         self.saved_revision = self.revision;
         self.mtime = fs::metadata(path).and_then(|m| m.modified()).ok();
         Ok(())
@@ -601,6 +677,24 @@ mod tests {
         doc.save().unwrap();
         let loaded = Document::load(DocumentId(2), path.clone()).unwrap();
         assert_eq!(loaded.text(), "const x = 1;\n");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn save_rewrites_other_line_breaks_as_lf() {
+        let path = temp_path("readme.md");
+        let mut doc = Document::new(
+            DocumentId(1),
+            Some(path.clone()),
+            "# r3vu\rA mouse\u{2028}next\n".into(),
+        );
+        let revision = doc.revision;
+        doc.save().unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(saved, "# r3vu\nA mouse\nnext\n");
+        assert_eq!(doc.text(), saved);
+        assert!(!doc.is_dirty());
+        assert!(doc.revision > revision);
         let _ = std::fs::remove_file(path);
     }
 

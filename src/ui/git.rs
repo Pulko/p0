@@ -208,7 +208,7 @@ fn row_line(
                     },
                 );
             }
-            let color = mark_color(*status, theme);
+            let color = super::explorer::git_mark_color(*status, *staged, theme);
             let name_style = selected_style(if selected { theme.fg } else { theme.fg_muted });
             Line::from(vec![
                 Span::styled(tick.to_string(), Style::default().fg(theme.accent)),
@@ -239,15 +239,6 @@ fn letter(status: GitFileStatus) -> &'static str {
         GitFileStatus::Deleted => "D",
         GitFileStatus::Renamed => "R",
         GitFileStatus::Untracked => "U",
-    }
-}
-
-fn mark_color(status: GitFileStatus, theme: Theme) -> Color {
-    match status {
-        GitFileStatus::Modified | GitFileStatus::Renamed => theme.warning,
-        GitFileStatus::Added => theme.added,
-        GitFileStatus::Deleted => theme.deleted,
-        GitFileStatus::Untracked => theme.fg_dim,
     }
 }
 

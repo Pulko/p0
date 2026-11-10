@@ -11,7 +11,10 @@ pub use coords::{
     display_col, line_display_width, line_text, line_visible_chars, position_to_byte,
     position_to_char, position_to_utf16, snap_to_grapheme, utf16_to_column,
 };
-pub use document::{Document, DocumentChange, DocumentId, LanguageId, LineEnding};
+pub use document::{
+    Document, DocumentChange, DocumentId, LanguageId, LineEnding, editor_content_lines,
+    editor_lines, normalize_line_breaks,
+};
 pub use ops::{
     EditorView, HScrollBar, Movement, Selection, Viewport, clamp_horizontal_left, delete_backward,
     delete_forward, delete_selection, hscroll_bar, hscroll_left_at, indent_for_newline,
