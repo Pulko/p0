@@ -575,6 +575,10 @@ impl App {
         self.git_repo && self.diff_view.is_some()
     }
 
+    pub fn file_content_showing(&self) -> bool {
+        self.active.is_some() && !self.diff_is_showing() && !self.markdown_preview_open()
+    }
+
     fn hide_git(&mut self) {
         self.git_repo = false;
         self.git_open = false;

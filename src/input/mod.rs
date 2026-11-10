@@ -518,7 +518,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                     app.explorer_selected = idx;
                 }
                 commands::show_explorer_menu(app, x, y);
-            } else if in_editor && y != app.editor_area.1 {
+            } else if in_editor && y != app.editor_area.1 && app.file_content_showing() {
                 app.focus = Focus::Editor;
                 commands::click_editor(app, x, y, false);
                 commands::show_editor_menu(app, x, y);
@@ -616,4 +616,95 @@ fn in_rect(area: Option<(u16, u16, u16, u16)>, x: u16, y: u16) -> bool {
     area.is_some_and(|(ax, ay, w, h)| {
         x >= ax && x < ax.saturating_add(w) && y >= ay && y < ay.saturating_add(h)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use tokio::sync::mpsc;
+
+    use crate::app::state::{App, DiffSource, DiffView, Overlay};
+    use crate::editor::DocumentId;
+    use crate::language::LanguageClient;
+
+    use super::handle_event;
+
+    fn with_runtime<T>(body: impl FnOnce() -> T) -> T {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        body()
+    }
+
+    fn test_app() -> App {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(PathBuf::from("."), LanguageClient { tx });
+        app.open_untitled();
+        app.editor_area = (0, 0, 80, 24);
+        app
+    }
+
+    fn right_click(column: u16, row: u16) -> Event {
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        })
+    }
+
+    fn symbol_menu(app: &App) -> bool {
+        matches!(
+            app.overlay,
+            Overlay::ContextMenu {
+                show_type: true,
+                ..
+            }
+        )
+    }
+
+    #[test]
+    fn symbol_menu_opens_on_file_content() {
+        with_runtime(|| {
+            let mut app = test_app();
+            handle_event(&mut app, right_click(10, 5));
+            assert!(symbol_menu(&app));
+        });
+    }
+
+    #[test]
+    fn symbol_menu_stays_closed_in_diff_mode() {
+        with_runtime(|| {
+            let mut app = test_app();
+            app.git_repo = true;
+            app.diff_view = Some(DiffView {
+                document_id: app.active.unwrap_or(DocumentId(0)),
+                path: Some(PathBuf::from("src/main.rs")),
+                source: DiffSource::Unstaged,
+                lines: Vec::new(),
+                parsed: None,
+                allow_hunks: false,
+                error: None,
+                scroll: 0,
+                loading: false,
+            });
+            handle_event(&mut app, right_click(10, 5));
+            assert!(matches!(app.overlay, Overlay::None));
+        });
+    }
+
+    #[test]
+    fn symbol_menu_stays_closed_in_markdown_preview() {
+        with_runtime(|| {
+            let mut app = test_app();
+            let id = app.active.expect("open file");
+            app.markdown_preview = Some(crate::markdown::Preview::open(id));
+            handle_event(&mut app, right_click(10, 5));
+            assert!(matches!(app.overlay, Overlay::None));
+        });
+    }
 }
