@@ -1,13 +1,13 @@
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
-use crate::app::state::{Focus, HeaderAction, HeaderHit, Overlay, SearchKind};
+use crate::app::state::{Focus, HeaderAction, HeaderHit, Overlay, SearchKind, SideTabHit};
 use crate::ui::theme::Theme;
 use crate::workspace::GitFileStatus;
 
@@ -68,7 +68,62 @@ pub fn render_search(frame: &mut Frame, area: Rect, app: &mut App) {
     );
 }
 
-pub fn render(frame: &mut Frame, area: Rect, app: &App) {
+pub(crate) fn side_block<'a>(area: Rect, app: &mut App) -> Block<'a> {
+    let theme = app.theme();
+    let focused = app.focus == Focus::Explorer;
+    let explorer = " Explorer ";
+    let changes = " Changes ";
+    let explorer_w = UnicodeWidthStr::width(explorer) as u16;
+    let changes_w = UnicodeWidthStr::width(changes) as u16;
+    let left_x = area.x.saturating_add(1);
+    let right_x = area
+        .x
+        .saturating_add(area.width)
+        .saturating_sub(1)
+        .saturating_sub(changes_w);
+    app.side_tabs.clear();
+    let room = area.width.saturating_sub(2);
+    let show_changes = app.git_repo;
+    if room > 0 {
+        app.side_tabs.push(SideTabHit {
+            x: left_x,
+            y: area.y,
+            width: explorer_w.min(room),
+            changes: false,
+        });
+        if show_changes && right_x >= left_x.saturating_add(explorer_w) && changes_w <= room {
+            app.side_tabs.push(SideTabHit {
+                x: right_x,
+                y: area.y,
+                width: changes_w,
+                changes: true,
+            });
+        }
+    }
+    let tab = |label: &'static str, on: bool, alignment: Alignment| {
+        let style = if on {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.fg_muted)
+        };
+        Line::from(Span::styled(label, style)).alignment(alignment)
+    };
+    let border = if focused { theme.accent } else { theme.border };
+    let explorer_on = if show_changes { !app.git_open } else { focused };
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border))
+        .style(theme.text())
+        .title(tab(explorer, explorer_on, Alignment::Left));
+    if show_changes {
+        block = block.title(tab(changes, app.git_open, Alignment::Right));
+    }
+    block
+}
+
+pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     let theme = app.theme();
     let inner_h = area.height.saturating_sub(2) as usize;
     let inner_w = area.width.saturating_sub(2) as usize;
@@ -95,7 +150,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         let git = if entry.is_dir {
             crate::workspace::directory_status(&app.git_status, &entry.path)
         } else {
-            app.git_status.get(&entry.path).copied()
+            app.git_status
+                .get(&entry.path)
+                .and_then(|status| status.summary())
         };
         let status = status_color(dirty, git, theme);
         let mut style = Style::default().fg(status.unwrap_or(if entry.is_dir {
@@ -123,7 +180,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(lines)
             .style(theme.text())
-            .block(theme.panel(" Explorer ", app.focus == Focus::Explorer)),
+            .block(side_block(area, app)),
         area,
     );
 }
@@ -136,6 +193,7 @@ fn status_mark(dirty: bool, git: Option<GitFileStatus>) -> &'static str {
         Some(GitFileStatus::Modified) => " M",
         Some(GitFileStatus::Added) => " A",
         Some(GitFileStatus::Deleted) => " D",
+        Some(GitFileStatus::Renamed) => " R",
         Some(GitFileStatus::Untracked) => " U",
         None => "",
     }
@@ -146,7 +204,7 @@ fn status_color(dirty: bool, git: Option<GitFileStatus>, theme: Theme) -> Option
         return Some(theme.warning);
     }
     match git {
-        Some(GitFileStatus::Modified) => Some(theme.warning),
+        Some(GitFileStatus::Modified | GitFileStatus::Renamed) => Some(theme.warning),
         Some(GitFileStatus::Added) => Some(theme.added),
         Some(GitFileStatus::Deleted) => Some(theme.deleted),
         Some(GitFileStatus::Untracked) => Some(theme.fg_dim),

@@ -19,7 +19,7 @@ r3vu is safe to use on a project you trust. It is a local terminal editor. It do
 | --- | --- | --- |
 | Edit and save files | Writes the buffer you save, through a temporary file in the same directory | Normal editor |
 | Search the project | Reads text files under the opened folder, skips ignored paths, null bytes, and files over 2 MB | Read only |
-| Git status and diff | Fixed git subcommands, each argument passed separately, no shell | No command injection |
+| Git status, diff, stage, unstage, and commit | Fixed git subcommands (`status`, `diff`, `show`, `add`, `restore`, `apply`, `commit`, `rev-parse`), each argument passed separately, no shell. A hunk patch is written to `git apply` on stdin. The commit message is one argument. | No command injection. Paths must stay inside the opened folder. `git commit` runs that repository's hooks. |
 | Language server | Looks up `typescript-language-server` on `PATH` and talks over stdin | Does not run a project binary |
 | Claude | Looks up `claude` on `PATH`. Fixed flags, prompt as one argument, stdin empty, no shell. `--permission-mode acceptEdits`. Stop sends `SIGKILL` to the process group | Edits the worktree. Other shell commands fail closed because stdin is empty, unless your own Claude settings already allow them |
 | Copy and paste | User action. Bracketed paste is on, so pasted text is not treated as keystrokes | Clipboard only |

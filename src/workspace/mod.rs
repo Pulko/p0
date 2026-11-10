@@ -21,14 +21,41 @@ pub enum GitFileStatus {
     Added,
     Deleted,
     Untracked,
+    Renamed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct GitPathStatus {
+    pub staged: Option<GitFileStatus>,
+    pub unstaged: Option<GitFileStatus>,
+}
+
+impl GitPathStatus {
+    pub fn summary(self) -> Option<GitFileStatus> {
+        self.unstaged.or(self.staged)
+    }
 }
 
 pub struct GitSnapshot {
-    pub files: HashMap<PathBuf, GitFileStatus>,
+    pub files: HashMap<PathBuf, GitPathStatus>,
     pub branch: Option<String>,
 }
 
-pub type GitStatusUpdate = Result<GitSnapshot, ()>;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitStatusError {
+    NotARepository,
+    Unavailable,
+}
+
+pub type GitStatusUpdate = Result<GitSnapshot, GitStatusError>;
+
+pub fn git_status_error(stderr: &str) -> GitStatusError {
+    if stderr.to_ascii_lowercase().contains("not a git repository") {
+        GitStatusError::NotARepository
+    } else {
+        GitStatusError::Unavailable
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WatchKind {
@@ -61,6 +88,7 @@ pub enum DiffKind {
 pub struct DiffLine {
     pub kind: DiffKind,
     pub text: String,
+    pub hunk: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,9 +163,7 @@ impl DiffBaseline {
 #[derive(Clone, Debug)]
 pub struct GitDiffResult {
     pub document_id: crate::editor::DocumentId,
-    pub lines: Vec<DiffLine>,
     pub baseline: Option<DiffBaseline>,
-    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -321,12 +347,13 @@ pub fn spawn_git_status(root: PathBuf, tx: mpsc::UnboundedSender<GitStatusUpdate
                 branch: git_branch(&root).await,
             }),
             Ok(output) => {
-                tracing::warn!("git status exited {}", output.status);
-                Err(())
+                let message = String::from_utf8_lossy(&output.stderr);
+                tracing::warn!("git status exited {}: {}", output.status, message.trim());
+                Err(git_status_error(&message))
             }
             Err(error) => {
                 tracing::warn!("git status failed: {error}");
-                Err(())
+                Err(GitStatusError::Unavailable)
             }
         };
         let _ = tx.send(update);
@@ -390,18 +417,19 @@ pub fn accept_watch_path(root: &Path, path: &Path, ignore: &mut ignore::Incremen
 }
 
 pub fn directory_status(
-    statuses: &HashMap<PathBuf, GitFileStatus>,
+    statuses: &HashMap<PathBuf, GitPathStatus>,
     dir: &Path,
 ) -> Option<GitFileStatus> {
     statuses
         .iter()
         .filter(|(path, _)| path.starts_with(dir))
-        .map(|(_, status)| *status)
+        .filter_map(|(_, status)| status.summary())
         .min_by_key(|status| match status {
             GitFileStatus::Modified => 0,
             GitFileStatus::Added => 1,
             GitFileStatus::Deleted => 2,
-            GitFileStatus::Untracked => 3,
+            GitFileStatus::Renamed => 3,
+            GitFileStatus::Untracked => 4,
         })
 }
 
@@ -417,30 +445,529 @@ pub fn watch_matcher(root: &Path) -> ignore::IncrementalIgnore {
         .expect("watch matcher for the workspace root")
 }
 
-pub fn parse_git_status(root: &Path, output: &[u8]) -> HashMap<PathBuf, GitFileStatus> {
+pub fn parse_git_status(root: &Path, output: &[u8]) -> HashMap<PathBuf, GitPathStatus> {
     let mut result = HashMap::new();
     let mut records = output
         .split(|byte| *byte == 0)
         .filter(|record| !record.is_empty());
     while let Some(record) = records.next() {
-        if record.len() < 4 {
+        if record.len() < 3 {
             continue;
         }
-        let xy = &record[..2];
-        let status = match xy {
-            b"??" => GitFileStatus::Untracked,
-            pair if pair.contains(&b'D') => GitFileStatus::Deleted,
-            pair if pair.contains(&b'A') => GitFileStatus::Added,
-            pair if pair.contains(&b'M') || pair.contains(&b'R') => GitFileStatus::Modified,
-            _ => continue,
+        let x = record[0];
+        let y = record[1];
+        let path_at = if record.get(2) == Some(&b' ') { 3 } else { 2 };
+        let first = String::from_utf8_lossy(&record[path_at..]).into_owned();
+        let renamed = matches!(x, b'R' | b'C') || matches!(y, b'R' | b'C');
+        let path = if renamed {
+            let Some(next) = records.next() else {
+                continue;
+            };
+            String::from_utf8_lossy(next).into_owned()
+        } else {
+            first
         };
-        let path = String::from_utf8_lossy(&record[3..]).into_owned();
-        if xy.contains(&b'R') {
-            let _ = records.next();
+        if path.is_empty() {
+            continue;
         }
+        let Some(status) = path_status(x, y) else {
+            continue;
+        };
         result.insert(root.join(path), status);
     }
     result
+}
+
+fn path_status(x: u8, y: u8) -> Option<GitPathStatus> {
+    if x == b'?' && y == b'?' {
+        return Some(GitPathStatus {
+            staged: None,
+            unstaged: Some(GitFileStatus::Untracked),
+        });
+    }
+    let staged = column_status(x);
+    let unstaged = column_status(y);
+    if staged.is_none() && unstaged.is_none() {
+        None
+    } else {
+        Some(GitPathStatus { staged, unstaged })
+    }
+}
+
+fn column_status(byte: u8) -> Option<GitFileStatus> {
+    match byte {
+        b'M' | b'T' | b'U' => Some(GitFileStatus::Modified),
+        b'A' => Some(GitFileStatus::Added),
+        b'D' => Some(GitFileStatus::Deleted),
+        b'R' | b'C' => Some(GitFileStatus::Renamed),
+        _ => None,
+    }
+}
+
+pub fn repo_relative(root: &Path, path: &Path) -> Option<String> {
+    let relative = if path.is_absolute() {
+        path.strip_prefix(root).ok()?
+    } else {
+        path
+    };
+    if relative.as_os_str().is_empty() || relative.is_absolute() {
+        return None;
+    }
+    if relative
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    let text = relative.to_string_lossy().replace('\\', "/");
+    if text.is_empty() || text.starts_with('/') {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+pub fn can_commit(message: &str, files: &HashMap<PathBuf, GitPathStatus>) -> bool {
+    !message.trim().is_empty() && files.values().any(|status| status.staged.is_some())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GitWrite {
+    Stage(PathBuf),
+    Unstage(PathBuf),
+    StageAll,
+    UnstageAll,
+    Apply {
+        patch: String,
+        cached: bool,
+        reverse: bool,
+        reload: Option<PathBuf>,
+    },
+    Commit(String),
+}
+
+pub struct GitArgv {
+    pub args: Vec<String>,
+    pub stdin: Option<String>,
+}
+
+pub fn prepare_git_write(root: &Path, write: &GitWrite) -> Result<GitArgv, String> {
+    match write {
+        GitWrite::Stage(path) => {
+            let rel = repo_relative(root, path)
+                .ok_or_else(|| "Path is outside the project".to_string())?;
+            Ok(GitArgv {
+                args: vec!["add".into(), "--".into(), rel],
+                stdin: None,
+            })
+        }
+        GitWrite::Unstage(path) => {
+            let rel = repo_relative(root, path)
+                .ok_or_else(|| "Path is outside the project".to_string())?;
+            Ok(GitArgv {
+                args: vec!["restore".into(), "--staged".into(), "--".into(), rel],
+                stdin: None,
+            })
+        }
+        GitWrite::StageAll => Ok(GitArgv {
+            args: vec!["add".into(), "-A".into()],
+            stdin: None,
+        }),
+        GitWrite::UnstageAll => Ok(GitArgv {
+            args: vec!["restore".into(), "--staged".into(), ":/".into()],
+            stdin: None,
+        }),
+        GitWrite::Apply {
+            patch,
+            cached,
+            reverse,
+            ..
+        } => {
+            let mut args = vec!["apply".into()];
+            if *reverse {
+                args.push("--reverse".into());
+            }
+            if *cached {
+                args.push("--cached".into());
+            }
+            args.push("-".into());
+            Ok(GitArgv {
+                args,
+                stdin: Some(patch.clone()),
+            })
+        }
+        GitWrite::Commit(message) => {
+            let message = message.trim();
+            if message.is_empty() {
+                return Err("Write a commit message".into());
+            }
+            if message.contains('\0') {
+                return Err("Commit message is invalid".into());
+            }
+            Ok(GitArgv {
+                args: vec!["commit".into(), "-m".into(), message.to_string()],
+                stdin: None,
+            })
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct GitWriteResult {
+    pub ok: bool,
+    pub message: String,
+    pub reload: Option<PathBuf>,
+    pub committed: Option<String>,
+}
+
+pub fn spawn_git_write(root: PathBuf, write: GitWrite, tx: mpsc::UnboundedSender<GitWriteResult>) {
+    tokio::spawn(async move {
+        let prepared = prepare_git_write(&root, &write);
+        let mut result = match prepared {
+            Ok(argv) => run_git(&root, &argv.args, argv.stdin).await,
+            Err(message) => GitWriteResult {
+                ok: false,
+                message,
+                reload: None,
+                committed: None,
+            },
+        };
+        if result.ok {
+            match &write {
+                GitWrite::Commit(message) => result.committed = Some(message.trim().to_string()),
+                GitWrite::Apply { reload, .. } => result.reload = reload.clone(),
+                _ => {}
+            }
+        }
+        let _ = tx.send(result);
+    });
+}
+
+async fn run_git(root: &Path, args: &[String], stdin_data: Option<String>) -> GitWriteResult {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(root);
+    for arg in args {
+        command.arg(arg);
+    }
+    if let Some(data) = stdin_data {
+        command.stdin(std::process::Stdio::piped());
+        command.stdout(std::process::Stdio::piped());
+        command.stderr(std::process::Stdio::piped());
+        let spawned = command.spawn();
+        let mut child = match spawned {
+            Ok(child) => child,
+            Err(error) => return git_failed(format!("Git unavailable: {error}")),
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            if let Err(error) = stdin.write_all(data.as_bytes()).await {
+                return git_failed(format!("Git unavailable: {error}"));
+            }
+        }
+        match child.wait_with_output().await {
+            Ok(output) => git_finished(output),
+            Err(error) => git_failed(format!("Git unavailable: {error}")),
+        }
+    } else {
+        match command.output().await {
+            Ok(output) => git_finished(output),
+            Err(error) => git_failed(format!("Git unavailable: {error}")),
+        }
+    }
+}
+
+fn git_finished(output: std::process::Output) -> GitWriteResult {
+    if output.status.success() {
+        GitWriteResult {
+            ok: true,
+            message: String::new(),
+            reload: None,
+            committed: None,
+        }
+    } else {
+        let message = String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .replace("fatal: ", "");
+        git_failed(if message.is_empty() {
+            format!("git exited {}", output.status)
+        } else {
+            message
+        })
+    }
+}
+
+fn git_failed(message: String) -> GitWriteResult {
+    GitWriteResult {
+        ok: false,
+        message,
+        reload: None,
+        committed: None,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitHunk {
+    pub header: String,
+    pub lines: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParsedGitDiff {
+    pub preamble: Vec<String>,
+    pub hunks: Vec<GitHunk>,
+}
+
+pub fn parse_git_diff(text: &str) -> ParsedGitDiff {
+    let mut preamble = Vec::new();
+    let mut hunks = Vec::new();
+    let mut current: Option<GitHunk> = None;
+    for line in text.lines() {
+        if line.starts_with("@@") {
+            if let Some(hunk) = current.take() {
+                hunks.push(hunk);
+            }
+            current = Some(GitHunk {
+                header: line.to_string(),
+                lines: Vec::new(),
+            });
+        } else if let Some(hunk) = current.as_mut() {
+            hunk.lines.push(line.to_string());
+        } else {
+            preamble.push(line.to_string());
+        }
+    }
+    if let Some(hunk) = current {
+        hunks.push(hunk);
+    }
+    ParsedGitDiff { preamble, hunks }
+}
+
+pub fn hunk_patch(diff: &ParsedGitDiff, index: usize) -> Option<String> {
+    let hunk = diff.hunks.get(index)?;
+    let mut out = String::new();
+    for line in &diff.preamble {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(&hunk.header);
+    out.push('\n');
+    for line in &hunk.lines {
+        out.push_str(line);
+        out.push('\n');
+    }
+    Some(out)
+}
+
+pub fn lines_from_git_diff(diff: &ParsedGitDiff) -> Vec<DiffLine> {
+    let mut lines = Vec::new();
+    for line in &diff.preamble {
+        lines.push(DiffLine {
+            kind: DiffKind::Header,
+            text: line.clone(),
+            hunk: None,
+        });
+    }
+    for (index, hunk) in diff.hunks.iter().enumerate() {
+        lines.push(DiffLine {
+            kind: DiffKind::Header,
+            text: hunk.header.clone(),
+            hunk: Some(index),
+        });
+        for line in &hunk.lines {
+            let kind = if line.starts_with('+') {
+                DiffKind::Insert
+            } else if line.starts_with('-') {
+                DiffKind::Delete
+            } else if line.starts_with('\\') {
+                DiffKind::Header
+            } else {
+                DiffKind::Equal
+            };
+            lines.push(DiffLine {
+                kind,
+                text: line.clone(),
+                hunk: None,
+            });
+        }
+    }
+    lines
+}
+
+pub fn untracked_diff_lines(text: &str) -> Vec<DiffLine> {
+    let mut lines = vec![
+        DiffLine {
+            kind: DiffKind::Header,
+            text: "--- /dev/null".into(),
+            hunk: None,
+        },
+        DiffLine {
+            kind: DiffKind::Header,
+            text: "+++ new file".into(),
+            hunk: None,
+        },
+    ];
+    let body = text.strip_suffix('\n').unwrap_or(text);
+    if body.is_empty() {
+        return lines;
+    }
+    for line in body.split('\n') {
+        lines.push(DiffLine {
+            kind: DiffKind::Insert,
+            text: format!("+{line}"),
+            hunk: None,
+        });
+    }
+    lines
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GitPanelRow {
+    Summary,
+    Message,
+    Commit,
+    Section {
+        staged: bool,
+    },
+    File {
+        path: PathBuf,
+        status: GitFileStatus,
+        staged: bool,
+    },
+}
+
+pub fn git_panel_rows(files: &HashMap<PathBuf, GitPathStatus>) -> Vec<GitPanelRow> {
+    let mut staged = Vec::new();
+    let mut changed = Vec::new();
+    for (path, status) in files {
+        if let Some(kind) = status.staged {
+            staged.push((path.clone(), kind));
+        }
+        if let Some(kind) = status.unstaged {
+            changed.push((path.clone(), kind));
+        }
+    }
+    staged.sort_by(|left, right| left.0.cmp(&right.0));
+    changed.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut rows = vec![
+        GitPanelRow::Summary,
+        GitPanelRow::Message,
+        GitPanelRow::Commit,
+        GitPanelRow::Section { staged: true },
+    ];
+    for (path, status) in staged {
+        rows.push(GitPanelRow::File {
+            path,
+            status,
+            staged: true,
+        });
+    }
+    rows.push(GitPanelRow::Section { staged: false });
+    for (path, status) in changed {
+        rows.push(GitPanelRow::File {
+            path,
+            status,
+            staged: false,
+        });
+    }
+    rows
+}
+
+#[derive(Clone, Debug)]
+pub struct FileDiffResult {
+    pub token: u64,
+    pub path: PathBuf,
+    pub staged: bool,
+    pub lines: Vec<DiffLine>,
+    pub parsed: Option<ParsedGitDiff>,
+    pub allow_hunks: bool,
+    pub error: Option<String>,
+}
+
+pub fn spawn_file_diff(
+    root: PathBuf,
+    path: PathBuf,
+    staged: bool,
+    allow_hunks: bool,
+    token: u64,
+    tx: mpsc::UnboundedSender<FileDiffResult>,
+) {
+    tokio::spawn(async move {
+        let result = match repo_relative(&root, &path) {
+            None => FileDiffResult {
+                token,
+                path,
+                staged,
+                lines: Vec::new(),
+                parsed: None,
+                allow_hunks: false,
+                error: Some("Path is outside the project".into()),
+            },
+            Some(relative) => {
+                let mut args = vec![
+                    "diff".to_string(),
+                    "-U3".into(),
+                    "--no-ext-diff".into(),
+                    "--no-color".into(),
+                ];
+                if staged {
+                    args.push("--cached".into());
+                }
+                args.push("--".into());
+                args.push(relative);
+                match Command::new("git")
+                    .arg("-C")
+                    .arg(&root)
+                    .args(&args)
+                    .output()
+                    .await
+                {
+                    Ok(output) if output.status.success() => {
+                        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+                        let parsed = parse_git_diff(&text);
+                        let has_hunks = !parsed.hunks.is_empty();
+                        let lines = lines_from_git_diff(&parsed);
+                        FileDiffResult {
+                            token,
+                            path,
+                            staged,
+                            lines,
+                            parsed: (allow_hunks && has_hunks).then_some(parsed),
+                            allow_hunks: allow_hunks && has_hunks,
+                            error: None,
+                        }
+                    }
+                    Ok(output) => {
+                        let message = String::from_utf8_lossy(&output.stderr)
+                            .trim()
+                            .replace("fatal: ", "");
+                        FileDiffResult {
+                            token,
+                            path,
+                            staged,
+                            lines: Vec::new(),
+                            parsed: None,
+                            allow_hunks: false,
+                            error: Some(if message.is_empty() {
+                                format!("git exited {}", output.status)
+                            } else {
+                                message
+                            }),
+                        }
+                    }
+                    Err(error) => FileDiffResult {
+                        token,
+                        path,
+                        staged,
+                        lines: Vec::new(),
+                        parsed: None,
+                        allow_hunks: false,
+                        error: Some(format!("Git unavailable: {error}")),
+                    },
+                }
+            }
+        };
+        let _ = tx.send(result);
+    });
 }
 
 pub fn path_absent_from_head(message: &str) -> bool {
@@ -452,7 +979,6 @@ pub fn spawn_git_diff(
     root: PathBuf,
     document_id: crate::editor::DocumentId,
     path: PathBuf,
-    current: String,
     tx: mpsc::UnboundedSender<GitDiffResult>,
 ) {
     tokio::spawn(async move {
@@ -470,9 +996,7 @@ pub fn spawn_git_diff(
                 let original = String::from_utf8_lossy(&output.stdout).into_owned();
                 GitDiffResult {
                     document_id,
-                    lines: build_diff(&original, &current),
                     baseline: Some(DiffBaseline::Head(original)),
-                    error: None,
                 }
             }
             Ok(output) => {
@@ -480,67 +1004,18 @@ pub fn spawn_git_diff(
                     .trim()
                     .to_string()
                     .replace("fatal: ", "");
-                if path_absent_from_head(&message) {
-                    GitDiffResult {
-                        document_id,
-                        lines: build_diff("", &current),
-                        baseline: Some(DiffBaseline::Absent),
-                        error: None,
-                    }
-                } else {
-                    GitDiffResult {
-                        document_id,
-                        lines: Vec::new(),
-                        baseline: None,
-                        error: Some(message),
-                    }
+                GitDiffResult {
+                    document_id,
+                    baseline: path_absent_from_head(&message).then_some(DiffBaseline::Absent),
                 }
             }
-            Err(error) => GitDiffResult {
+            Err(_) => GitDiffResult {
                 document_id,
-                lines: Vec::new(),
                 baseline: None,
-                error: Some(format!("Git unavailable: {error}")),
             },
         };
         let _ = tx.send(result);
     });
-}
-
-pub fn build_diff(original: &str, current: &str) -> Vec<DiffLine> {
-    use similar::{ChangeTag, TextDiff};
-
-    let diff = TextDiff::from_lines(original, current);
-    let mut lines = vec![
-        DiffLine {
-            kind: DiffKind::Header,
-            text: "--- HEAD".into(),
-        },
-        DiffLine {
-            kind: DiffKind::Header,
-            text: "+++ working buffer".into(),
-        },
-    ];
-    for group in diff.grouped_ops(3) {
-        lines.push(DiffLine {
-            kind: DiffKind::Header,
-            text: "@@".into(),
-        });
-        for op in group {
-            for change in diff.iter_changes(&op) {
-                let (kind, prefix) = match change.tag() {
-                    ChangeTag::Delete => (DiffKind::Delete, "-"),
-                    ChangeTag::Insert => (DiffKind::Insert, "+"),
-                    ChangeTag::Equal => (DiffKind::Equal, " "),
-                };
-                lines.push(DiffLine {
-                    kind,
-                    text: format!("{prefix}{}", change.value().trim_end_matches('\n')),
-                });
-            }
-        }
-    }
-    lines
 }
 
 pub fn classify_lines(original: &str, current: &str) -> LineChanges {
@@ -928,32 +1403,174 @@ mod tests {
         let root = Path::new("/repo");
         let statuses = parse_git_status(
             root,
-            b" M src/main.ts\0A  src/new.ts\0?? notes.txt\0D  old.ts\0",
+            b" M src/main.ts\0M  src/staged.ts\0MM src/both.ts\0A  src/new.ts\0D  old.ts\0 D gone.ts\0?? notes.txt\0R  from.ts\0to.ts\0",
+        );
+        let main = statuses.get(&root.join("src/main.ts")).copied().unwrap();
+        assert_eq!(main.staged, None);
+        assert_eq!(main.unstaged, Some(GitFileStatus::Modified));
+        assert_eq!(main.summary(), Some(GitFileStatus::Modified));
+        let staged = statuses.get(&root.join("src/staged.ts")).copied().unwrap();
+        assert_eq!(staged.staged, Some(GitFileStatus::Modified));
+        assert_eq!(staged.unstaged, None);
+        let both = statuses.get(&root.join("src/both.ts")).copied().unwrap();
+        assert_eq!(both.staged, Some(GitFileStatus::Modified));
+        assert_eq!(both.unstaged, Some(GitFileStatus::Modified));
+        assert_eq!(
+            statuses.get(&root.join("src/new.ts")).unwrap().staged,
+            Some(GitFileStatus::Added)
         );
         assert_eq!(
-            statuses.get(&root.join("src/main.ts")),
-            Some(&GitFileStatus::Modified)
+            statuses.get(&root.join("old.ts")).unwrap().staged,
+            Some(GitFileStatus::Deleted)
         );
         assert_eq!(
-            statuses.get(&root.join("src/new.ts")),
-            Some(&GitFileStatus::Added)
+            statuses.get(&root.join("gone.ts")).unwrap().unstaged,
+            Some(GitFileStatus::Deleted)
         );
         assert_eq!(
-            statuses.get(&root.join("notes.txt")),
-            Some(&GitFileStatus::Untracked)
+            statuses.get(&root.join("notes.txt")).unwrap().unstaged,
+            Some(GitFileStatus::Untracked)
         );
+        assert!(statuses.get(&root.join("from.ts")).is_none());
         assert_eq!(
-            statuses.get(&root.join("old.ts")),
-            Some(&GitFileStatus::Deleted)
+            statuses.get(&root.join("to.ts")).unwrap().staged,
+            Some(GitFileStatus::Renamed)
         );
     }
 
     #[test]
-    fn builds_colored_line_diff() {
-        let lines = build_diff("const x = 1;\n", "const x = 2;\n");
-        assert!(lines.iter().any(|line| line.kind == DiffKind::Delete));
-        assert!(lines.iter().any(|line| line.kind == DiffKind::Insert));
-        assert!(lines.iter().any(|line| line.kind == DiffKind::Header));
+    fn hunk_patch_keeps_the_file_header() {
+        let text = "\
+diff --git a/src/main.rs b/src/main.rs
+index 111..222 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,3 +1,3 @@
+ keep
+-old
++new
+ keep
+@@ -10,2 +10,2 @@
+ a
+-b
++c
+";
+        let parsed = parse_git_diff(text);
+        assert_eq!(parsed.hunks.len(), 2);
+        let patch = hunk_patch(&parsed, 1).unwrap();
+        assert!(patch.contains("diff --git a/src/main.rs b/src/main.rs"));
+        assert!(patch.contains("--- a/src/main.rs"));
+        assert!(patch.contains("+++ b/src/main.rs"));
+        assert!(patch.contains("@@ -10,2 +10,2 @@"));
+        assert!(!patch.contains("@@ -1,3 +1,3 @@"));
+        assert!(patch.contains("-b\n"));
+        assert!(patch.contains("+c\n"));
+        assert!(patch.ends_with("+c\n"));
+    }
+
+    #[test]
+    fn rejects_a_path_that_escapes_the_project() {
+        let root = Path::new("/repo");
+        assert_eq!(
+            repo_relative(root, Path::new("/repo/src/main.rs")).as_deref(),
+            Some("src/main.rs")
+        );
+        assert_eq!(
+            repo_relative(root, Path::new("src/main.rs")).as_deref(),
+            Some("src/main.rs")
+        );
+        assert!(repo_relative(root, Path::new("/etc/passwd")).is_none());
+        assert!(repo_relative(root, Path::new("")).is_none());
+        assert!(repo_relative(root, Path::new("..")).is_none());
+        assert!(repo_relative(root, Path::new("src/../../etc/passwd")).is_none());
+        assert!(repo_relative(root, root).is_none());
+        let escaped =
+            prepare_git_write(root, &GitWrite::Stage(PathBuf::from("/repo/../etc/passwd")));
+        assert!(escaped.is_err());
+        let commit = prepare_git_write(root, &GitWrite::Commit("  ".into()));
+        assert!(commit.is_err());
+        let ok = prepare_git_write(root, &GitWrite::Commit("Keep the review".into())).unwrap();
+        assert_eq!(ok.args, ["commit", "-m", "Keep the review"]);
+        assert!(!ok.args.iter().any(|arg| arg == "--no-verify"));
+    }
+
+    #[test]
+    fn commit_needs_a_message_and_a_staged_file() {
+        let mut files = HashMap::new();
+        assert!(!can_commit("Keep it", &files));
+        assert!(!can_commit("  ", &files));
+        files.insert(
+            PathBuf::from("a.ts"),
+            GitPathStatus {
+                staged: None,
+                unstaged: Some(GitFileStatus::Modified),
+            },
+        );
+        assert!(!can_commit("Keep it", &files));
+        files.insert(
+            PathBuf::from("b.ts"),
+            GitPathStatus {
+                staged: Some(GitFileStatus::Added),
+                unstaged: None,
+            },
+        );
+        assert!(!can_commit("   ", &files));
+        assert!(can_commit("Keep it", &files));
+    }
+
+    #[test]
+    fn panel_lists_a_partial_file_on_both_sides() {
+        let mut files = HashMap::new();
+        files.insert(
+            PathBuf::from("both.ts"),
+            GitPathStatus {
+                staged: Some(GitFileStatus::Modified),
+                unstaged: Some(GitFileStatus::Modified),
+            },
+        );
+        files.insert(
+            PathBuf::from("new.ts"),
+            GitPathStatus {
+                staged: None,
+                unstaged: Some(GitFileStatus::Untracked),
+            },
+        );
+        files.insert(
+            PathBuf::from("done.ts"),
+            GitPathStatus {
+                staged: Some(GitFileStatus::Added),
+                unstaged: None,
+            },
+        );
+        let rows = git_panel_rows(&files);
+        let staged: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                GitPanelRow::File {
+                    path, staged: true, ..
+                } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        let changed: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                GitPanelRow::File {
+                    path,
+                    staged: false,
+                    ..
+                } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            staged,
+            vec![PathBuf::from("both.ts"), PathBuf::from("done.ts")]
+        );
+        assert_eq!(
+            changed,
+            vec![PathBuf::from("both.ts"), PathBuf::from("new.ts")]
+        );
     }
 
     #[test]
@@ -1072,9 +1689,27 @@ mod tests {
     fn folder_mark_prefers_modified_and_stays_inside_the_directory() {
         let root = Path::new("/repo");
         let mut statuses = HashMap::new();
-        statuses.insert(root.join("src/notes.txt"), GitFileStatus::Untracked);
-        statuses.insert(root.join("src/main.ts"), GitFileStatus::Modified);
-        statuses.insert(root.join("src2/other.ts"), GitFileStatus::Added);
+        statuses.insert(
+            root.join("src/notes.txt"),
+            GitPathStatus {
+                staged: None,
+                unstaged: Some(GitFileStatus::Untracked),
+            },
+        );
+        statuses.insert(
+            root.join("src/main.ts"),
+            GitPathStatus {
+                staged: None,
+                unstaged: Some(GitFileStatus::Modified),
+            },
+        );
+        statuses.insert(
+            root.join("src2/other.ts"),
+            GitPathStatus {
+                staged: Some(GitFileStatus::Added),
+                unstaged: None,
+            },
+        );
         assert_eq!(
             directory_status(&statuses, &root.join("src")),
             Some(GitFileStatus::Modified)
@@ -1165,6 +1800,20 @@ mod tests {
             &root.join(".git/HEAD"),
             &mut ignore
         ));
+    }
+
+    #[test]
+    fn tells_a_missing_repository_from_other_git_failures() {
+        assert_eq!(
+            git_status_error(
+                "fatal: not a git repository (or any of the parent directories): .git"
+            ),
+            GitStatusError::NotARepository
+        );
+        assert_eq!(
+            git_status_error("fatal: unable to read current working directory"),
+            GitStatusError::Unavailable
+        );
     }
 
     #[test]

@@ -156,6 +156,10 @@ async fn main() -> anyhow::Result<()> {
     app.git_status_tx = git_status_tx;
     let (diff_tx, mut diff_rx) = mpsc::unbounded_channel();
     app.diff_tx = diff_tx;
+    let (git_write_tx, mut git_write_rx) = mpsc::unbounded_channel();
+    app.git_write_tx = git_write_tx;
+    let (file_diff_tx, mut file_diff_rx) = mpsc::unbounded_channel();
+    app.file_diff_tx = file_diff_tx;
     let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
     app.agent_tx = agent_tx;
     app.refresh_git_status();
@@ -197,6 +201,16 @@ async fn main() -> anyhow::Result<()> {
             diff = diff_rx.recv() => {
                 if let Some(diff) = diff {
                     app.receive_diff(diff);
+                }
+            }
+            write = git_write_rx.recv() => {
+                if let Some(write) = write {
+                    app::commands::receive_git_write(&mut app, write);
+                }
+            }
+            file_diff = file_diff_rx.recv() => {
+                if let Some(file_diff) = file_diff {
+                    app.receive_file_diff(file_diff);
                 }
             }
             event = watch_rx.recv() => {

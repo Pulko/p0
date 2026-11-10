@@ -27,6 +27,7 @@ Click to place the cursor. Type to insert. There are no modes.
 | Undo / redo | Ctrl+Z / Ctrl+Y |
 | Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab |
 | Git diff | Ctrl+Shift+D |
+| Git panel | Ctrl+Shift+G |
 | Preview Markdown | Ctrl+Shift+M |
 | Toggle explorer | Ctrl+B |
 | Close file | Ctrl+W |
@@ -40,6 +41,8 @@ Click **Find** above the explorer, or press Ctrl+P, to find a file by name and t
 Claude is off until you turn it on. Open **Help** and click the Claude row. After that, click **Claude** in the status bar to show or hide the thread pane. Option+T anchors a conversation to the selection, or to the cursor line, and waits for Enter. Option+E asks for one edit instruction. A running turn can be stopped from that status segment or from **Stop** in the pane. Claude has to be installed and logged in; the editor does not start a turn until you ask.
 
 Right-click a symbol for its type, Go to Definition, and Find References. Click a gutter mark to show the previous lines, and click again to hide them. Click ↩ before the line number to revert the change. A red underline is an error and a yellow one is a warning; the status bar shows that message at the cursor, and pausing the mouse shows the full text.
+
+In a Git repository, click **Changes** on the right of the explorer border, or the branch in the status bar, to stage and commit. **Explorer** on the left of that border returns to the file tree. Click **Diff** on the right of the file border to open that same interactive diff for the current file. The file name on the left, or opening a file, returns to the buffer. `+` stages a file and `−` unstages it. Space does the same for the selected file. Commit writes only what is staged. In that diff, **Stage**, **Unstage**, and **Discard** act on one hunk. Discard asks first. Save the file before staging it.
 
 ## Config
 

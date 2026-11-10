@@ -1,13 +1,15 @@
 use ratatui::Frame;
-use ratatui::layout::{Position as TermPos, Rect};
+use ratatui::layout::{Alignment, Position as TermPos, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
-use crate::app::state::{HScrollHit, TabHitBox};
+use crate::app::state::{
+    ContentTabHit, DiffHit, DiffSource, Focus, HScrollHit, HunkAction, TabHitBox,
+};
 use crate::editor::{Range, display_col, hscroll_bar, line_text, max_line_display_width};
 use crate::syntax::HighlightKind;
 use crate::ui::theme::{Theme, highlight_color, highlight_modifier};
@@ -15,25 +17,22 @@ use crate::workspace::{DiffKind, LineChanges, LineMark, VisualRow};
 
 pub fn render(frame: &mut Frame, tabs: Rect, area: Rect, app: &mut App) {
     app.hscroll_hit = None;
+    app.diff_hits.clear();
     let theme = app.theme();
     render_tabs(frame, tabs, app, theme);
+    if app.diff_is_showing() {
+        render_diff(frame, area, app, theme);
+        return;
+    }
     let Some(id) = app.active else {
         frame.render_widget(
             Paragraph::new("Open a file from the explorer or press Ctrl+P")
                 .style(theme.text())
-                .block(theme.panel(" Editor ", app.focus == crate::app::state::Focus::Editor)),
+                .block(content_block(area, app, "Editor")),
             area,
         );
         return;
     };
-    if app
-        .diff_view
-        .as_ref()
-        .is_some_and(|diff| diff.document_id == id)
-    {
-        render_diff(frame, area, app, theme);
-        return;
-    }
     if app
         .markdown_preview
         .as_ref()
@@ -150,42 +149,40 @@ pub fn render(frame: &mut Frame, tabs: Rect, area: Rect, app: &mut App) {
     let title = doc
         .path
         .as_ref()
-        .map(|p| format!(" {} ", app.relative(p)))
-        .unwrap_or_else(|| " untitled ".into());
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(theme.text())
-            .block(theme.panel(&title, app.focus == crate::app::state::Focus::Editor)),
-        area,
-    );
-
-    if let Some(view) = app.views.get(&id) {
+        .map(|p| app.relative(p))
+        .unwrap_or_else(|| "untitled".into());
+    let cursor = app.views.get(&id).and_then(|view| {
         let text = line_text(&doc.rope, view.cursor.line);
         let col = display_col(&text, view.cursor.column, tab_width);
         let cursor_row = rows
             .iter()
-            .position(|row| matches!(row, VisualRow::Line(line) if *line == view.cursor.line));
-        if let Some(cursor_row) = cursor_row {
-            if cursor_row >= view.viewport.top
-                && cursor_row < view.viewport.top + inner_h
-                && col >= view.viewport.left
-                && col < view.viewport.left + inner_w
-            {
-                let x = area.x + 1 + gutter + (col - view.viewport.left) as u16;
-                let y = area.y + 1 + (cursor_row - view.viewport.top) as u16;
-                if app.focus == crate::app::state::Focus::Editor
-                    && matches!(
-                        app.overlay,
-                        crate::app::state::Overlay::None
-                            | crate::app::state::Overlay::Completion { .. }
-                            | crate::app::state::Overlay::Hover { .. }
-                            | crate::app::state::Overlay::Signature { .. }
-                    )
-                {
-                    frame.set_cursor_position(TermPos { x, y });
-                }
-            }
-        }
+            .position(|row| matches!(row, VisualRow::Line(line) if *line == view.cursor.line))?;
+        (cursor_row >= view.viewport.top
+            && cursor_row < view.viewport.top + inner_h
+            && col >= view.viewport.left
+            && col < view.viewport.left + inner_w)
+            .then_some(TermPos {
+                x: area.x + 1 + gutter + (col - view.viewport.left) as u16,
+                y: area.y + 1 + (cursor_row - view.viewport.top) as u16,
+            })
+    });
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(theme.text())
+            .block(content_block(area, app, &title)),
+        area,
+    );
+    if let Some(cursor) = cursor
+        && app.focus == Focus::Editor
+        && matches!(
+            app.overlay,
+            crate::app::state::Overlay::None
+                | crate::app::state::Overlay::Completion { .. }
+                | crate::app::state::Overlay::Hover { .. }
+                | crate::app::state::Overlay::Signature { .. }
+        )
+    {
+        frame.set_cursor_position(cursor);
     }
     paint_hscroll(frame, area, app, theme, inner_w);
 }
@@ -363,11 +360,18 @@ fn change_style(changes: &LineChanges, line_idx: usize, theme: Theme) -> Option<
     Some(Style::default().fg(theme.on_accent).bg(color))
 }
 
-fn render_diff(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
-    let Some(diff) = app.diff_view.as_ref() else {
+fn render_diff(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
+    let Some(diff) = app.diff_view.clone() else {
         return;
     };
     let height = area.height.saturating_sub(2) as usize;
+    let inner_w = area.width.saturating_sub(2) as usize;
+    let title = diff
+        .path
+        .as_ref()
+        .map(|path| app.relative(path))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "Editor".into());
     let lines = if diff.loading {
         vec![Line::from(Span::styled(
             "Loading Git diff…",
@@ -378,7 +382,7 @@ fn render_diff(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
             format!("Git diff unavailable: {error}"),
             Style::default().fg(theme.warning),
         ))]
-    } else if diff.lines.len() <= 4 {
+    } else if diff.lines.is_empty() {
         vec![Line::from(Span::styled(
             "No changes from HEAD",
             Style::default().fg(theme.fg_dim),
@@ -386,26 +390,199 @@ fn render_diff(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     } else {
         diff.lines
             .iter()
+            .enumerate()
             .skip(diff.scroll)
             .take(height)
-            .map(|line| {
-                let style = match line.kind {
-                    DiffKind::Header => Style::default().fg(theme.accent),
-                    DiffKind::Insert => Style::default().fg(theme.added),
-                    DiffKind::Delete => Style::default().fg(theme.deleted),
-                    DiffKind::Equal => Style::default().fg(theme.fg_muted),
-                };
-                Line::from(Span::styled(line.text.clone(), style))
+            .map(|(index, line)| {
+                let row = index - diff.scroll;
+                let y = area.y.saturating_add(1).saturating_add(row as u16);
+                diff_line(
+                    app,
+                    line,
+                    theme,
+                    inner_w,
+                    area.x.saturating_add(1),
+                    y,
+                    diff.source,
+                    diff.allow_hunks,
+                )
             })
             .collect()
     };
     frame.render_widget(
-        Paragraph::new(lines).style(theme.text()).block(theme.panel(
-            " Git diff: HEAD ↔ working buffer ",
-            app.focus == crate::app::state::Focus::Editor,
-        )),
+        Paragraph::new(lines)
+            .style(theme.text())
+            .block(content_block(area, app, &title)),
         area,
     );
+}
+
+fn content_block(area: Rect, app: &mut App, title: &str) -> Block<'static> {
+    let theme = app.theme();
+    let focused = app.focus == Focus::Editor;
+    let diff_on = app.diff_is_showing();
+    let show_diff = app.git_repo;
+    let diff_label = " Diff ";
+    let diff_w = UnicodeWidthStr::width(diff_label) as u16;
+    let room = area.width.saturating_sub(2);
+    let left_max = (if show_diff {
+        room.saturating_sub(diff_w.saturating_add(1))
+    } else {
+        room
+    }) as usize;
+    let left = fit_border_title(title, left_max);
+    let left_w = UnicodeWidthStr::width(left.as_str()) as u16;
+    let left_x = area.x.saturating_add(1);
+    let right_x = area
+        .x
+        .saturating_add(area.width)
+        .saturating_sub(1)
+        .saturating_sub(diff_w);
+    app.content_tabs.clear();
+    if room > 0 && left_w > 0 {
+        app.content_tabs.push(ContentTabHit {
+            x: left_x,
+            y: area.y,
+            width: left_w.min(room),
+            diff: false,
+        });
+        if show_diff && right_x >= left_x.saturating_add(left_w) && diff_w <= room {
+            app.content_tabs.push(ContentTabHit {
+                x: right_x,
+                y: area.y,
+                width: diff_w,
+                diff: true,
+            });
+        }
+    }
+    let tab = |label: String, on: bool, alignment: Alignment| {
+        let style = if on {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.fg_muted)
+        };
+        Line::from(Span::styled(label, style)).alignment(alignment)
+    };
+    let border = if focused { theme.accent } else { theme.border };
+    let left_on = if show_diff { !diff_on } else { focused };
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border))
+        .style(theme.text())
+        .title(tab(left, left_on, Alignment::Left));
+    if show_diff {
+        block = block.title(tab(diff_label.to_string(), diff_on, Alignment::Right));
+    }
+    block
+}
+
+fn fit_border_title(title: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let padded = format!(" {title} ");
+    if UnicodeWidthStr::width(padded.as_str()) <= max_width {
+        return padded;
+    }
+    if max_width <= 2 {
+        return title.graphemes(true).take(max_width).collect();
+    }
+    let inner = max_width - 2;
+    let mut body = String::new();
+    let mut width = 0usize;
+    for grapheme in title.graphemes(true) {
+        let next = UnicodeWidthStr::width(grapheme);
+        if width + next + 1 > inner {
+            break;
+        }
+        body.push_str(grapheme);
+        width += next;
+    }
+    format!(" {body}… ")
+}
+
+fn diff_line(
+    app: &mut App,
+    line: &crate::workspace::DiffLine,
+    theme: Theme,
+    inner_w: usize,
+    x: u16,
+    y: u16,
+    source: DiffSource,
+    allow_hunks: bool,
+) -> Line<'static> {
+    let style = match line.kind {
+        DiffKind::Header => Style::default().fg(theme.accent),
+        DiffKind::Insert => Style::default().fg(theme.added),
+        DiffKind::Delete => Style::default().fg(theme.deleted),
+        DiffKind::Equal => Style::default().fg(theme.fg_muted),
+    };
+    let actions: Vec<(&str, HunkAction)> = match (allow_hunks, line.hunk, source) {
+        (true, Some(_), DiffSource::Unstaged) => {
+            vec![
+                (" Stage ", HunkAction::Stage),
+                (" Discard ", HunkAction::Discard),
+            ]
+        }
+        (true, Some(_), DiffSource::Staged) => vec![(" Unstage ", HunkAction::Unstage)],
+        _ => Vec::new(),
+    };
+    if actions.is_empty() {
+        return Line::from(Span::styled(fit_diff(&line.text, inner_w), style));
+    }
+    let hunk = line.hunk.unwrap_or(0);
+    let actions_w: usize = actions
+        .iter()
+        .map(|(label, _)| UnicodeWidthStr::width(*label))
+        .sum();
+    let text_w = inner_w.saturating_sub(actions_w.saturating_add(1));
+    let text = fit_diff(&line.text, text_w);
+    let gap =
+        inner_w.saturating_sub(UnicodeWidthStr::width(text.as_str()).saturating_add(actions_w));
+    let mut spans = vec![Span::styled(text, style), Span::raw(" ".repeat(gap))];
+    let mut cursor = x.saturating_add((inner_w.saturating_sub(actions_w)) as u16);
+    for (label, action) in actions {
+        let width = UnicodeWidthStr::width(label) as u16;
+        app.diff_hits.push(DiffHit {
+            x: cursor,
+            y,
+            width,
+            hunk,
+            action,
+        });
+        let action_style = match action {
+            HunkAction::Discard => Style::default().fg(theme.deleted),
+            HunkAction::Stage | HunkAction::Unstage => Style::default()
+                .fg(theme.on_accent)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        };
+        spans.push(Span::styled((*label).to_string(), action_style));
+        cursor = cursor.saturating_add(width);
+    }
+    Line::from(spans)
+}
+
+fn fit_diff(text: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    let ellipsis = "…";
+    let keep = max_width.saturating_sub(UnicodeWidthStr::width(ellipsis));
+    let mut out = String::new();
+    let mut width = 0;
+    for grapheme in text.graphemes(true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if width + grapheme_width > keep {
+            break;
+        }
+        out.push_str(grapheme);
+        width += grapheme_width;
+    }
+    out.push('…');
+    out
 }
 
 fn render_markdown(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
@@ -416,8 +593,8 @@ fn render_markdown(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
         .as_ref()
         .and_then(|preview| app.documents.get(&preview.document_id))
         .and_then(|doc| doc.path.as_ref().map(|path| app.relative(path)))
-        .map(|name| format!(" Preview {name} "))
-        .unwrap_or_else(|| " Preview ".into());
+        .map(|name| format!("Preview {name}"))
+        .unwrap_or_else(|| "Preview".into());
     let refresh = app.markdown_preview.as_ref().and_then(|preview| {
         let doc = app.documents.get(&preview.document_id)?;
         Some((
@@ -440,7 +617,7 @@ fn render_markdown(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     frame.render_widget(
         Paragraph::new(lines)
             .style(theme.text())
-            .block(theme.panel(&title, app.focus == crate::app::state::Focus::Editor)),
+            .block(content_block(area, app, &title)),
         area,
     );
 }

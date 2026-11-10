@@ -13,7 +13,9 @@ pub fn handle_event(app: &mut App, event: Event) {
         Event::Key(key) if key.kind != KeyEventKind::Release => handle_key(app, key),
         Event::Mouse(mouse) => handle_mouse(app, mouse),
         Event::Paste(text) => {
-            if app.focus == Focus::Thread && matches!(app.overlay, Overlay::None) {
+            if app.git_message_focus && matches!(app.overlay, Overlay::None) {
+                app.git_message.push_str(&text.replace(['\n', '\r'], " "));
+            } else if app.focus == Focus::Thread && matches!(app.overlay, Overlay::None) {
                 app.thread
                     .compose
                     .push_str(&text.replace(['\n', '\r'], " "));
@@ -39,6 +41,10 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             commands::dismiss_overlay(app);
             return;
         }
+        if app.git_message_focus {
+            app.git_message_focus = false;
+            return;
+        }
         if app.markdown_preview.is_some() {
             app.markdown_preview = None;
             return;
@@ -55,6 +61,10 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('p') | KeyCode::Char('P') => return commands::open_search(app),
             KeyCode::Char('d') | KeyCode::Char('D') if shift => {
                 app.toggle_diff();
+                return;
+            }
+            KeyCode::Char('g') | KeyCode::Char('G') if shift => {
+                app.toggle_git();
                 return;
             }
             KeyCode::Char('m') | KeyCode::Char('M') if shift => {
@@ -147,6 +157,47 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             _ => {}
         }
         return;
+    }
+
+    if app.git_open && app.focus == Focus::Explorer && matches!(app.overlay, Overlay::None) {
+        if app.git_message_focus {
+            match key.code {
+                KeyCode::Enter => commands::commit_git(app),
+                KeyCode::Backspace => {
+                    app.git_message.pop();
+                }
+                KeyCode::Char(ch) => app.git_message.push(ch),
+                KeyCode::Tab => {
+                    app.git_message_focus = false;
+                    app.focus = Focus::Editor;
+                }
+                _ => {}
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Up => {
+                commands::move_git(app, -1);
+                return;
+            }
+            KeyCode::Down => {
+                commands::move_git(app, 1);
+                return;
+            }
+            KeyCode::Enter => {
+                commands::open_selected_git(app);
+                return;
+            }
+            KeyCode::Char(' ') => {
+                commands::toggle_selected_git(app);
+                return;
+            }
+            KeyCode::Tab => {
+                app.focus = Focus::Editor;
+                return;
+            }
+            _ => return,
+        }
     }
 
     if app.focus == Focus::Explorer && matches!(app.overlay, Overlay::None) {
@@ -311,11 +362,11 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
             }
             if let Some(Some(action)) = status_hit {
                 match action {
-                    crate::app::state::StatusAction::Diff => app.toggle_diff(),
                     crate::app::state::StatusAction::Markdown => app.toggle_markdown_preview(),
                     crate::app::state::StatusAction::Theme => commands::open_themes(app),
                     crate::app::state::StatusAction::Help => commands::open_help(app),
                     crate::app::state::StatusAction::Types => commands::click_types_status(app),
+                    crate::app::state::StatusAction::Git => app.toggle_git(),
                     crate::app::state::StatusAction::Agent => {
                         if commands::claude_ready(app) {
                             if app.thread.running {
@@ -364,8 +415,14 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                     }
                 }
             } else if in_explorer {
-                app.focus = Focus::Explorer;
-                commands::click_explorer(app, y);
+                if let Some(changes) = side_tab_at(app, x, y) {
+                    app.show_changes(changes);
+                } else if app.git_open {
+                    commands::click_git(app, x, y);
+                } else {
+                    app.focus = Focus::Explorer;
+                    commands::click_explorer(app, y);
+                }
             } else if in_thread {
                 if let Some((hit_x, hit_y, width)) = app.thread_stop
                     && y == hit_y
@@ -378,7 +435,29 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                     app.overlay = Overlay::None;
                 }
             } else if in_editor {
+                app.git_message_focus = false;
                 app.focus = Focus::Editor;
+                if y == app.editor_area.1 {
+                    if let Some(diff) = content_tab_at(app, x, y) {
+                        if diff && !app.diff_is_showing() {
+                            app.toggle_diff();
+                        } else if !diff && app.diff_is_showing() {
+                            app.diff_view = None;
+                        }
+                    }
+                    return;
+                }
+                if app.diff_is_showing() {
+                    if let Some(hit) = app
+                        .diff_hits
+                        .iter()
+                        .find(|hit| y == hit.y && x >= hit.x && x < hit.x.saturating_add(hit.width))
+                        .copied()
+                    {
+                        app.request_hunk(hit.hunk, hit.action);
+                    }
+                    return;
+                }
                 if !commands::begin_hscroll_drag(app, x, y) {
                     if mouse.modifiers.contains(KeyModifiers::CONTROL) {
                         commands::click_editor(app, x, y, false);
@@ -427,7 +506,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                 {
                     commands::show_tab_menu(app, tab.document_id, x, y);
                 }
-            } else if in_explorer {
+            } else if in_explorer && !app.git_open && y != app.explorer_area.1 {
                 app.focus = Focus::Explorer;
                 if let Some(idx) = crate::app::state::explorer_index_at(
                     app.explorer_scroll,
@@ -439,7 +518,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                     app.explorer_selected = idx;
                 }
                 commands::show_explorer_menu(app, x, y);
-            } else if in_editor {
+            } else if in_editor && y != app.editor_area.1 {
                 app.focus = Focus::Editor;
                 commands::click_editor(app, x, y, false);
                 commands::show_editor_menu(app, x, y);
@@ -517,6 +596,20 @@ fn dispatch_wheel(
         WheelAction::Thread(delta) => commands::scroll_thread(app, delta),
         WheelAction::None => {}
     }
+}
+
+fn side_tab_at(app: &App, x: u16, y: u16) -> Option<bool> {
+    app.side_tabs
+        .iter()
+        .find(|hit| y == hit.y && x >= hit.x && x < hit.x.saturating_add(hit.width))
+        .map(|hit| hit.changes)
+}
+
+fn content_tab_at(app: &App, x: u16, y: u16) -> Option<bool> {
+    app.content_tabs
+        .iter()
+        .find(|hit| y == hit.y && x >= hit.x && x < hit.x.saturating_add(hit.width))
+        .map(|hit| hit.diff)
 }
 
 fn in_rect(area: Option<(u16, u16, u16, u16)>, x: u16, y: u16) -> bool {

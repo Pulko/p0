@@ -334,7 +334,7 @@ fn render_types_note(frame: &mut Frame, app: &mut App, theme: Theme) {
 }
 
 fn render_help(frame: &mut Frame, app: &mut App, theme: crate::ui::theme::Theme) {
-    let shortcuts = shortcut_rows().len();
+    let shortcuts = shortcut_rows(app.git_repo).len();
     let width = 52u16.min(frame.area().width.saturating_sub(2)).max(24);
     let height = (shortcuts as u16 + 6)
         .min(frame.area().height.saturating_sub(2))
@@ -342,7 +342,7 @@ fn render_help(frame: &mut Frame, app: &mut App, theme: crate::ui::theme::Theme)
     let area = center(frame.area(), height, width);
     app.overlay_area = Some((area.x, area.y, area.width, area.height));
     let inner = area.height.saturating_sub(2) as usize;
-    let rows = visible_help_rows(inner);
+    let rows = visible_help_rows(inner, app.git_repo);
     app.overlay_rows = rows
         .iter()
         .enumerate()
@@ -410,7 +410,7 @@ enum HelpRow {
     Shortcut(&'static str, &'static str),
 }
 
-fn visible_help_rows(limit: usize) -> Vec<HelpRow> {
+fn visible_help_rows(limit: usize, git: bool) -> Vec<HelpRow> {
     if limit == 0 {
         return Vec::new();
     }
@@ -422,7 +422,7 @@ fn visible_help_rows(limit: usize) -> Vec<HelpRow> {
     }
     rows.push(HelpRow::Toggle);
     left -= 1;
-    let shortcuts = shortcut_rows();
+    let shortcuts = shortcut_rows(git);
     if left >= 2 {
         if left >= shortcuts.len() + 2 {
             rows.push(HelpRow::Gap);
@@ -440,8 +440,8 @@ fn visible_help_rows(limit: usize) -> Vec<HelpRow> {
     rows
 }
 
-pub(crate) fn shortcut_rows() -> Vec<(&'static str, &'static str)> {
-    vec![
+pub(crate) fn shortcut_rows(git: bool) -> Vec<(&'static str, &'static str)> {
+    let mut rows = vec![
         ("Ctrl+/", "Show this list"),
         ("Ctrl+S", "Save"),
         ("Ctrl+P", "Find"),
@@ -454,7 +454,18 @@ pub(crate) fn shortcut_rows() -> Vec<(&'static str, &'static str)> {
         ("Ctrl+R", "Rename symbol"),
         ("Ctrl+Z / Y", "Undo / redo"),
         ("Ctrl+Tab", "Next / previous tab"),
-        ("Ctrl+Shift+D", "Git diff"),
+    ];
+    if git {
+        rows.extend([
+            ("Ctrl+Shift+D", "Git diff"),
+            ("Click Diff", "Stage and review the file"),
+            ("Ctrl+Shift+G", "Git panel"),
+            ("Click Changes", "Stage and commit"),
+            ("Space", "Stage or unstage the file"),
+            ("Click Stage", "Stage, unstage, or discard a hunk"),
+        ]);
+    }
+    rows.extend([
         ("Ctrl+Shift+M", "Preview Markdown"),
         ("Click Markdown", "Preview this file"),
         ("Click ↩", "Revert this change"),
@@ -464,7 +475,8 @@ pub(crate) fn shortcut_rows() -> Vec<(&'static str, &'static str)> {
         ("Ctrl+N", "New file"),
         ("Ctrl+Q", "Quit"),
         ("Esc", "Close a popup"),
-    ]
+    ]);
+    rows
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -651,7 +663,7 @@ mod tests {
 
     #[test]
     fn help_popup_opens_with_settings_then_shortcuts() {
-        let rows = visible_help_rows(100);
+        let rows = visible_help_rows(100, true);
         assert!(matches!(rows.first(), Some(HelpRow::Header("Settings"))));
         assert!(matches!(rows.get(1), Some(HelpRow::Toggle)));
         assert!(matches!(rows.get(2), Some(HelpRow::Gap)));
@@ -660,7 +672,15 @@ mod tests {
             rows.get(4),
             Some(HelpRow::Shortcut("Ctrl+/", "Show this list"))
         ));
-        assert!(matches!(visible_help_rows(1).as_slice(), [HelpRow::Toggle]));
+        assert!(matches!(
+            visible_help_rows(1, true).as_slice(),
+            [HelpRow::Toggle]
+        ));
+        assert!(
+            !shortcut_rows(false)
+                .iter()
+                .any(|(keys, _)| *keys == "Click Changes" || *keys == "Click Diff")
+        );
     }
 
     #[test]

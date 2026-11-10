@@ -31,14 +31,6 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         } else {
             ("", String::new(), false)
         };
-    let diff_style = if app.diff_view.is_some() {
-        Style::default()
-            .fg(theme.on_accent)
-            .bg(theme.accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.fg_dim)
-    };
     let theme_style = if matches!(app.overlay, Overlay::Themes { .. }) {
         Style::default()
             .fg(theme.on_accent)
@@ -78,15 +70,6 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         .unwrap_or_default();
     let mut left = vec![
         Piece {
-            text: if app.diff_view.is_some() {
-                " DIFF ".into()
-            } else {
-                " Diff ".into()
-            },
-            style: diff_style,
-            action: Some(StatusAction::Diff),
-        },
-        Piece {
             text: format!(" {pos} "),
             style: Style::default().fg(theme.fg_muted),
             action: None,
@@ -123,11 +106,21 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             action: None,
         });
     }
-    if let Some(branch) = &app.git_branch {
+    if app.git_repo
+        && let Some(branch) = &app.git_branch
+    {
+        let branch_style = if app.git_open {
+            Style::default()
+                .fg(theme.on_accent)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.fg_muted)
+        };
         left.push(Piece {
             text: format!(" {branch} "),
-            style: Style::default().fg(theme.fg_muted),
-            action: None,
+            style: branch_style,
+            action: Some(StatusAction::Git),
         });
     }
     if !msg.is_empty() {

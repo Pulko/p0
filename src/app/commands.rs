@@ -639,6 +639,7 @@ pub fn confirm_yes(app: &mut App) {
                 }
             }
         }
+        ConfirmAction::DiscardHunk { patch, path } => app.discard_hunk(patch, path),
         ConfirmAction::DeletePath(path) => {
             if let Err(err) = delete_path(&path) {
                 app.message = Some(format!("delete failed: {err}"));
@@ -1583,6 +1584,14 @@ pub fn scroll_editor(app: &mut App, delta: i32) {
 }
 
 pub fn scroll_explorer(app: &mut App, delta: i32) {
+    if app.git_open {
+        let len = crate::workspace::git_panel_rows(&app.git_status).len();
+        let inner = explorer_inner_rows(app.explorer_area.3);
+        let max = max_explorer_scroll(len, inner);
+        let next = app.git_scroll as i64 + i64::from(delta);
+        app.git_scroll = next.clamp(0, max as i64) as usize;
+        return;
+    }
     let inner = explorer_inner_rows(app.explorer_area.3);
     let max = max_explorer_scroll(app.explorer_entries.len(), inner);
     let next = app.explorer_scroll as i64 + i64::from(delta);
@@ -2067,6 +2076,119 @@ fn capture_anchor(app: &App) -> Option<Anchor> {
         end_line: end.min(start + snippet.len().saturating_sub(1)) + 1,
         snippet: snippet.join("\n"),
     })
+}
+
+pub fn commit_git(app: &mut App) {
+    app.commit_git();
+}
+
+pub fn move_git(app: &mut App, delta: i32) {
+    let rows = crate::workspace::git_panel_rows(&app.git_status);
+    let files: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            matches!(row, crate::workspace::GitPanelRow::File { .. }).then_some(index)
+        })
+        .collect();
+    if files.is_empty() {
+        return;
+    }
+    let pos = files
+        .iter()
+        .position(|index| *index == app.git_selected)
+        .unwrap_or(0);
+    let next = if delta < 0 {
+        pos.saturating_sub(1)
+    } else {
+        (pos + 1).min(files.len() - 1)
+    };
+    app.git_selected = files[next];
+    let inner = explorer_inner_rows(app.explorer_area.3);
+    if app.git_selected < app.git_scroll {
+        app.git_scroll = app.git_selected;
+    } else if inner > 0 && app.git_selected >= app.git_scroll + inner {
+        app.git_scroll = app.git_selected + 1 - inner;
+    }
+}
+
+pub fn open_selected_git(app: &mut App) {
+    let rows = crate::workspace::git_panel_rows(&app.git_status);
+    let Some(crate::workspace::GitPanelRow::File { path, staged, .. }) = rows.get(app.git_selected)
+    else {
+        return;
+    };
+    app.open_git_entry(path.clone(), *staged);
+}
+
+pub fn toggle_selected_git(app: &mut App) {
+    let rows = crate::workspace::git_panel_rows(&app.git_status);
+    let Some(crate::workspace::GitPanelRow::File { path, staged, .. }) = rows.get(app.git_selected)
+    else {
+        return;
+    };
+    app.toggle_stage(path.clone(), *staged);
+}
+
+pub fn click_git(app: &mut App, x: u16, y: u16) {
+    app.focus = Focus::Explorer;
+    if let Some(action) = app
+        .git_hits
+        .iter()
+        .find(|hit| y == hit.y && x >= hit.x && x < hit.x.saturating_add(hit.width))
+        .map(|hit| hit.action.clone())
+    {
+        match action {
+            crate::app::state::GitClick::Message => app.git_message_focus = true,
+            crate::app::state::GitClick::Commit => app.commit_git(),
+            crate::app::state::GitClick::StageAll => app.stage_all(),
+            crate::app::state::GitClick::UnstageAll => app.unstage_all(),
+            crate::app::state::GitClick::Toggle { path, staged } => app.toggle_stage(path, staged),
+            crate::app::state::GitClick::Open { path, staged } => {
+                app.git_selected = crate::workspace::git_panel_rows(&app.git_status)
+                    .iter()
+                    .position(|row| {
+                        matches!(
+                            row,
+                            crate::workspace::GitPanelRow::File {
+                                path: row_path,
+                                staged: row_staged,
+                                ..
+                            } if row_path == &path && *row_staged == staged
+                        )
+                    })
+                    .unwrap_or(app.git_selected);
+                app.open_git_entry(path, staged);
+            }
+        }
+        return;
+    }
+    app.git_message_focus = false;
+    let top = app.explorer_area.1.saturating_add(1);
+    let bottom = app
+        .explorer_area
+        .1
+        .saturating_add(app.explorer_area.3.saturating_sub(1));
+    if y >= top && y < bottom {
+        let index = app.git_scroll + usize::from(y - top);
+        let len = crate::workspace::git_panel_rows(&app.git_status).len();
+        if index < len {
+            app.git_selected = index;
+        }
+    }
+}
+
+pub fn receive_git_write(app: &mut App, result: crate::workspace::GitWriteResult) {
+    let reload = result.reload.clone();
+    let ok = result.ok;
+    app.note_git_write(result);
+    if ok {
+        if let Some(path) = reload {
+            app.reload_clean_document(&path);
+        }
+    }
+    app.refresh_git_status();
+    app.refresh_open_file_diff();
 }
 
 pub fn click_explorer(app: &mut App, y: u16) {
