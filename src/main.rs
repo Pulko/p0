@@ -1,13 +1,3 @@
-mod agent;
-mod app;
-mod editor;
-mod input;
-mod language;
-mod markdown;
-mod syntax;
-mod ui;
-mod workspace;
-
 use std::io::stdout;
 use std::panic;
 use std::path::PathBuf;
@@ -29,11 +19,13 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
-use app::App;
-use app::config::log_path;
-use app::state::HOVER_DWELL;
-use language::{LanguageClient, LspCmd};
-use workspace::{WatchEvent, accept_watch_path, classify_watch_kind, watch_matcher};
+use r3vu::app::config::log_path;
+use r3vu::app::state::HOVER_DWELL;
+use r3vu::app::{self, App};
+use r3vu::input;
+use r3vu::language::{LanguageClient, LspCmd};
+use r3vu::ui;
+use r3vu::workspace::{WatchEvent, accept_watch_path, classify_watch_kind, watch_matcher};
 
 struct TerminalGuard;
 

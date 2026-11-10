@@ -64,6 +64,24 @@ Types and completion use the TypeScript language server. Editing continues if it
 npm install -g typescript typescript-language-server
 ```
 
+## Benchmarks
+
+```bash
+cargo bench --bench editor
+```
+
+That runs the Criterion suite in `benches/editor.rs` on a release build. Keystroke and reparse times are one character inserted and then deleted, so reparse includes two incremental parses. Highlight covers about 60 visible lines. These medians are from one run on this machine:
+
+| Work | 200 lines | 5,000 lines | 30,000 lines |
+| --- | ---: | ---: | ---: |
+| Keystroke | 3.1 µs | 3.7 µs | 3.7 µs |
+| Reparse | 512 µs | 2.15 ms | 15.1 ms |
+| Viewport highlight | 526 µs | 562 µs | 614 µs |
+| Open file | 426 µs | 11.0 ms | 67.8 ms |
+| Search in file | 10.8 µs | 264 µs | 1.55 ms |
+
+Loading the tree-sitter grammars took 29.5 ms. Finding a file among 20,000 paths took 1.03 ms after a 1.75 ms index. Listing a 120-file workspace took 383 µs, and searching it took 1.80 ms. Parsing `git status` took 82 µs for 500 paths and 788 µs for 5,000. Plots land in `target/criterion/`.
+
 ## Limits
 
 - Git marks need a worktree.

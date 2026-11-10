@@ -48,3 +48,10 @@ unicode-segmentation = "1.13.3"
 unicode-width = "0.2.3"
 uuid = { version = "1.29.1", features = ["v4"] }
 which = "8.0.6"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "editor"
+harness = false
